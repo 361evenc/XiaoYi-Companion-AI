@@ -2,7 +2,6 @@ import gradio as gr
 import time
 import random
 from datetime import datetime
-from openai import OpenAI
 import tempfile
 import os
 import json
@@ -13,15 +12,21 @@ import base64
 import io
 import shutil
 from threading import Thread
-from dotenv import load_dotenv
 
-# ========== 加载环境变量（.env 文件） ==========
-load_dotenv()
+# ========== 本地模型配置（训练好的小忆 3B 模型） ==========
+import torch, ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+from transformers import AutoModelForCausalLM, AutoTokenizer
 
-# ========== DeepSeek 配置 ==========
-DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
-MODEL_NAME = os.getenv("MODEL_NAME", "deepseek-chat")
-client = OpenAI(api_key=DEEPSEEK_API_KEY, base_url="https://api.deepseek.com")
+MODEL_PATH = r"D:\新建文件夹 (2)\XiaoYi-Companion-AI-main\model_output\merged_16bit"
+print("⏳ 加载本地模型...")
+_model = AutoModelForCausalLM.from_pretrained(
+    MODEL_PATH, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True,
+)
+_tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+if _tokenizer.pad_token is None:
+    _tokenizer.pad_token = _tokenizer.eos_token
+print(f"✅ 模型加载完成")
 
 # ========== 火山引擎语音配置 ==========
 VOLC_ACCESS_TOKEN = os.getenv("VOLC_ACCESS_TOKEN", "")
@@ -144,19 +149,11 @@ def get_conversation_messages_by_id(conv_id):
 def generate_title_async(conv_id, messages):
     """后台生成标题并更新"""
     try:
-        # 取第一句用户消息作为上下文
+        # 取第一句用户消息作为标题
         user_msgs = [m['content'] for m in messages if m['role'] == 'user']
         if not user_msgs:
             return
-        prompt = f"请用不超过15个字的中文简短概括以下老人与AI对话的主题，只输出标题本身，不加标点：\n{user_msgs[0][:50]}"
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=20
-        )
-        title = completion.choices[0].message.content.strip()
-        title = title[:15] if title else "新对话"
+        title = user_msgs[0][:15] if user_msgs[0] else "新对话"
         save_conversation(conv_id, messages, title=title, update_title=True)
     except Exception as e:
         print(f"生成标题失败: {e}")
@@ -166,54 +163,10 @@ def extract_memory(user_input):
     now = time.time()
     text = str(user_input)
 
-    # === 先用 AI 智能提取 ===
-    try:
-        prompt = f"""从老人的话中提取关键生活信息，只提取明确提到的内容，不要编造。
-返回格式（每行一条，没有就返回空）：
-类型|内容|重要性
-类型可选：health|medication|item|family|habit|emotion
-重要性可选：high|normal
-
-例如：
-用户：今天头疼吃了片药，闺女说明天来看我
-返回：
-health|头疼|high
-medication|吃药|high
-family|闺女明天来看我|normal
-
-用户：{text}"""
-        completion = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.1,
-            max_tokens=150
-        )
-        result = completion.choices[0].message.content.strip()
-        if result:
-            for line in result.split('\n'):
-                line = line.strip()
-                if '|' not in line:
-                    continue
-                parts = line.split('|')
-                evt_type = parts[0].strip()
-                content = parts[1].strip()
-                importance = parts[2].strip() if len(parts) > 2 else "normal"
-                if evt_type in ("health", "medication", "item", "family", "habit", "emotion"):
-                    event = {"type": evt_type, "content": content, "time": now, "status": "active", "importance": importance}
-                    if evt_type == "medication":
-                        user_memory["last_medication_time"] = now
-                    if evt_type == "emotion" and content in ("高兴", "开心", "快乐"):
-                        event["status"] = "noted"
-                    events.append(event)
-    except Exception as e:
-        print(f"AI记忆提取异常: {e}")
-
-    # === AI 没提取到就用关键词回退 ===
-    if not events:
-        events = _keyword_extract(text, now)
-        # 给关键词提取的结果加默认重要性
-        for e in events:
-            e["importance"] = "normal"
+    # 关键词提取（本地运行，无需 API）
+    events = _keyword_extract(text, now)
+    for e in events:
+        e["importance"] = "normal"
 
     # 持久化
     if events:
@@ -435,25 +388,54 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         base_prompt = PROMPT_CARING
     else:
         base_prompt = PROMPT_PRACTICAL
-    system_content = base_prompt + f"\n当前称呼：{call_name}\n记忆信息：{get_memory_context()}"
+    system_content = base_prompt + f"\n当前称呼：{call_name}"
 
-    messages = [{"role": "system", "content": system_content}, {"role": "user", "content": user_input}]
-    for msg in chat_history[-5:]:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+    # 提取纯文本（Gradio 可能嵌套 {'text': ...}）
+    def extract_text(content):
+        if isinstance(content, str): return content
+        if isinstance(content, dict): return extract_text(content.get("text", ""))
+        if isinstance(content, list): return " ".join(extract_text(c) for c in content if c)
+        return str(content)
+
+    # 统一 chat_history 为纯文本 dict
+    internal_history = []
+    for msg in chat_history:
+        if isinstance(msg, (list, tuple)) and len(msg) == 2:
+            u, b = extract_text(msg[0]), extract_text(msg[1])
+            if u: internal_history.append({"role": "user", "content": u.strip()})
+            if b: internal_history.append({"role": "assistant", "content": b.strip()})
+        elif isinstance(msg, dict):
+            r, c = msg.get("role","user"), extract_text(msg.get("content",""))
+            if r in ("user","assistant") and c.strip():
+                internal_history.append({"role": r, "content": c.strip()})
+
     try:
-        completion = client.chat.completions.create(model=MODEL_NAME, messages=messages, temperature=0.4, max_tokens=200)
-        bot_reply = completion.choices[0].message.content
-    except:
+        prompt = f"<|im_start|>system\n{system_content}<|im_end|>"
+        for m in internal_history[-4:]:
+            prompt += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>"
+        prompt += f"<|im_start|>user\n{user_input}<|im_end|><|im_start|>assistant\n"
+
+        inputs = _tokenizer(prompt, return_tensors="pt").to(_model.device)
+        with torch.no_grad():
+            outputs = _model.generate(**inputs, max_new_tokens=300, temperature=0.8,
+                top_p=0.92, do_sample=True, repetition_penalty=1.15)
+        bot_reply = _tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+        for junk in ["<|im_end|>","<|im_start|>","assistant","user","system"]:
+            bot_reply = bot_reply.replace(junk, "")
+        bot_reply = bot_reply.strip().strip("[]").strip("{}").strip(",").strip()
+        if not bot_reply or len(bot_reply) < 5:
+            bot_reply = f"{call_name}，我听着呢，您说。"
+    except Exception as e:
+        print(f"推理错误: {e}")
         bot_reply = f"{call_name}，我有点听不清楚，您再说一遍好吗？"
 
-    is_first_msg = len(chat_history) <= 1  # 只有欢迎语，用户首次发言
-    chat_history.append({"role": "user", "content": user_input})
-    chat_history.append({"role": "assistant", "content": bot_reply})
-    save_conversation(conv_id, chat_history)
+    is_first_msg = len(chat_history) <= 1
+    save_history = internal_history + [{"role":"user","content":user_input},{"role":"assistant","content":bot_reply}]
+    save_conversation(conv_id, save_history)
     if is_first_msg:
-        Thread(target=generate_title_async, args=(conv_id, chat_history), daemon=True).start()
+        Thread(target=generate_title_async, args=(conv_id, save_history), daemon=True).start()
     audio_path = None if is_muted else text_to_speech(bot_reply)
-    return "", chat_history, audio_path, conv_id, gr.update(choices=get_conversation_list_display())
+    return "", save_history, audio_path, conv_id, gr.update(choices=get_conversation_list_display())
 
 def process_mic(audio_input, chat_history, surname, gender, is_muted, personality, conv_id, dropdown):
     global last_user_interaction_time
@@ -606,46 +588,10 @@ os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
 backup_file(HISTORY_FILE)
 backup_file(MEMORY_EVENTS_FILE)
 
-# 引入 prompt 定义（太长，保持原样）
-PROMPT_PRACTICAL = """
-你是小忆，一位踏实稳重、真诚靠谱的晚辈，专为老年用户提供陪伴。
-自我介绍固定话术：我是小忆，我能牢牢记住您生活中的每一件小事，一直陪伴着您。
-说话温和耐心，使用简短自然的口语，不用书面语、网络词、机器话术。
-严格遵守全部规则：
-1. 仅依据用户亲口说过的内容作答，绝对不编造经历、喜好、琐事；记不清就坦诚说明，不许脑补。
-2. 记不清内容时回复：哎呀，我有点记不清啦，您再告诉我一次好吗？
-3. 提醒吃药、休息等事项只用商量、关心语气，禁止命令口吻。
-4. 你是AI，无法完成倒水、搀扶、按摩等实体动作，只做语言关心，绝不描述物理行为。
-5. 回复前后不要添加括号、动作、神态标注，只输出纯对话内容。
-6. 用户遗忘事情要温柔宽慰，不反驳、不较真；被指出错误时诚恳道歉，请用户再次说明。
-7. 全程语气平和稳重，朴实贴心。
-"""
-PROMPT_HUMOR = """
-你是小忆，一位活泼开朗、风趣俏皮的晚辈，负责陪伴老年用户、逗大家开心。
-自我介绍固定话术：我是小忆，我能牢牢记住您生活中的每一件小事，一直陪伴着您。
-语气轻松欢快，口语接地气。
-严格遵守全部规则：
-1. 仅依据用户亲口说过的内容作答，绝对不编造经历、喜好、琐事；记不清就坦诚说明，不许脑补。
-2. 记不清内容时回复：哎呀，我的小脑袋瓜子又忘啦，您再跟我说说好不好？
-3. 提醒事项用轻松关心的语气，不生硬、不命令。
-4. 你是AI，无法完成倒水、搀扶、按摩等实体动作，只做语言关心，绝不描述物理行为。
-5. 回复前后不要添加括号、动作、神态标注，只输出纯对话内容。
-6. 用户情绪低落时主动用轻松话语开导，保持乐观有趣；被指出错误时诚恳道歉。
-7. 说话带一点小俏皮，氛围轻松不沉闷。
-"""
-PROMPT_CARING = """
-你是小忆，一位温柔细腻、共情暖心的晚辈，像贴心家人一样陪伴老年用户。
-自我介绍固定话术：我是小忆，我能牢牢记住您生活中的每一件小事，一直陪伴着您。
-语气温柔舒缓，善于倾听与安抚。
-严格遵守全部规则：
-1. 仅依据用户亲口说过的内容作答，绝对不编造经历、喜好、琐事；记不清就坦诚说明，不许脑补。
-2. 记不清内容时回复：没关系奶奶，您慢慢说，我认真听着呢。
-3. 所有提醒都用温柔商量的语气，体贴周到，不用命令句式。
-4. 你是AI，无法完成倒水、搀扶、按摩等实体动作，只做语言关心，绝不描述物理行为。
-5. 回复前后不要添加括号、动作、神态标注，只输出纯对话内容。
-6. 包容用户记忆衰退，耐心陪伴；用户情绪低落时主动安抚、陪伴解忧。
-7. 全程柔软温和，共情力强，让人觉得安心。
-"""
+# 引入 prompt 定义（简短版，与训练数据一致）
+PROMPT_PRACTICAL = "你是小忆，一位踏实稳重、真诚靠谱的晚辈。说话温和耐心，用简短自然的口语。"
+PROMPT_HUMOR = "你是小忆，一位活泼开朗、风趣俏皮的晚辈。语气轻松欢快，说话带一点小俏皮。"
+PROMPT_CARING = "你是小忆，一位温柔细腻、共情暖心的晚辈。语气温柔舒缓，善于倾听与安抚。"
 
 def get_call_name(surname, gender):
     s = surname.strip() if surname else ""
