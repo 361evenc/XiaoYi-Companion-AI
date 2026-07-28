@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+venv/
+.venv/
+.env
+
+# 训练相关临时文件
+training_data/*.json
+*.log
+offload/
+
+# 训练好的模型（太大，单独从 HuggingFace 下载）
+model_output/
+
+# 本地模型缓存（太大不放仓库）
+qwen3b_local/
+
+# 备份
+backups/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
