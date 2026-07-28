@@ -18,7 +18,7 @@ import torch, ssl
 ssl._create_default_https_context = ssl._create_unverified_context
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-MODEL_PATH = r"D:\新建文件夹 (2)\XiaoYi-Companion-AI-main\model_output\merged_16bit"
+MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_output", "merged_16bit")
 print("⏳ 加载本地模型...")
 _model = AutoModelForCausalLM.from_pretrained(
     MODEL_PATH, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True,
