@@ -101,19 +101,21 @@ pip install -r requirements.txt
 
 ### 配置 API 密钥
 
-打开 `app.py`，在第 18-24 行填入你的密钥：
+本项目通过**环境变量**读取密钥（推荐用 `.env` 文件，已随 `python-dotenv` 安装，会自动加载）：
 
-```python
-# ========== DeepSeek 配置 ==========
-DEEPSEEK_API_KEY = "sk-你的DeepSeek密钥"
-MODEL_NAME = "deepseek-chat"
-
-# ========== 火山引擎语音配置 ==========
-VOLC_ACCESS_TOKEN = "你的火山引擎AccessToken"
-VOLC_APP_ID = "你的火山引擎AppID"
+```bash
+# 在项目根目录新建 .env 文件，内容示例：
+DEEPSEEK_API_KEY=sk-你的DeepSeek密钥
+VOLC_ACCESS_TOKEN=你的火山引擎AccessToken
+VOLC_APP_ID=你的火山引擎AppID
+# 可选：自定义模型与接口地址
+# DEEPSEEK_MODEL=deepseek-chat
+# DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 ```
 
 > **注意**：不配置语音服务不影响文字聊天功能，只是语音输入和语音播报不可用。若只测试文字对话，可以跳过语音配置。
+>
+> **离线回退**：未设置 `DEEPSEEK_API_KEY` 时也能正常运行——小忆会自动回退到本地关键词方案（实体抽取、记忆检索、安全过滤、情绪分析均提供降级版）。设置密钥后，上述能力会切换到 DeepSeek 驱动的更智能版本。
 
 ---
 
@@ -143,11 +145,12 @@ python app.py
 
 ```
 小忆陪伴助手/
-├── app.py                 # 主程序（Gradio 界面 + 全部逻辑）
+├── app.py                 # 主程序（Gradio 界面 + 对话/记忆主流程）
+├── ai_services.py         # AI 大脑服务层（实体抽取、记忆检索、主动触发、安全过滤、情绪分析、小传等；DeepSeek 驱动 + 关键词回退）
 ├── requirements.txt       # Python 依赖清单
-├── conversations.json     # 对话历史数据（自动生成）
-├── user_memory.json       # 用户记忆数据（自动生成）
-├── memory_events.json     # 记忆事件持久化（自动生成）
+├── conversations.json     # 对话历史数据（自动生成，运行时数据）
+├── user_memory.json       # 用户记忆数据（自动生成，运行时数据）
+├── memory_events.json     # 记忆事件持久化（自动生成，运行时数据）
 ├── backups/               # 数据备份目录（自动生成）
 ├── README.md              # 本说明书
 └── CLAUDE.md              # 项目描述（给 AI 助手看）

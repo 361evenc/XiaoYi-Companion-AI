@@ -7,6 +7,13 @@ venv/
 .venv/
 .env
 
+# WorkBuddy 本地记忆与运行态（非项目代码，禁止入库）
+.workbuddy/
+
+# 运行时生成的数据
+emotion_log.json
+emotion_*.png
+
 # 训练相关临时文件
 training_data/*.json
 *.log
