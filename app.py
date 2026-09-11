@@ -39,6 +39,9 @@ if _tokenizer.pad_token is None:
     _tokenizer.pad_token = _tokenizer.eos_token
 print(f"✅ 模型加载完成")
 
+# 本地模型全局锁：聊天推理 / 提醒意图解析 / 记忆抽取共用，避免 CPU 上并发 generate
+MODEL_LOCK = threading.Lock()
+
 def _load_secret(name):
     """读取密钥：优先环境变量，其次本地 local_secrets.json（不入库，防止公开仓库泄露）"""
     val = os.getenv(name)
@@ -81,6 +84,7 @@ from reminder import (ReminderStore, cn_to_int, parse_time_expr, humanize_ts,
                       later_ack_message, clarify_time_message, list_message,
                       select_message, confirm_cancel_message, modify_ask_message,
                       cancel_ack_message, abort_message, capability_message)
+from memory_system import MemoryBank
 
 ASR_URL = "https://openspeech.bytedance.com/api/v1/asr"
 TTS_URL = "https://openspeech.bytedance.com/api/v1/tts"
@@ -301,11 +305,12 @@ def generate_title_async(conv_id, messages):
         print(f"生成标题失败: {e}")
 
 def extract_memory(user_input):
+    """关键词事件抽取：驱动主动关怀（吃药提醒/健康回访）。
+    语义层的画像/检索/反思由 memory_bank（LLM结构化抽取）负责，两者互补。"""
     events = []
     now = time.time()
     text = str(user_input)
 
-    # 关键词提取（本地运行，无需 API）
     events = _keyword_extract(text, now)
     for e in events:
         e["importance"] = "normal"
@@ -348,84 +353,6 @@ def _keyword_extract(text, now):
             events.append({"type": "emotion", "content": content, "time": now, "status": status})
     return events
 
-def get_memory_context():
-    recent = [e for e in user_memory["events"] if e.get("status") == "active" and (time.time() - e["time"]) < 600]
-    if not recent:
-        return "目前没有任何需要你记住的具体事件。"
-    lines = []
-    for e in recent:
-        minutes_ago = int((time.time() - e["time"]) / 60)
-        time_str = "刚刚" if minutes_ago == 0 else f"{minutes_ago}分钟前"
-        lines.append(f"{time_str}老人提到：{e['content']}。")
-    return "\n".join(lines)
-
-def get_recent_events_display():
-    events = user_memory["events"]
-    if not events:
-        return "<div style='color:#8B5E34;padding:8px;text-align:center;'>暂无记录</div>"
-
-    type_info = {
-        "health": {"icon": "🏥", "label": "健康", "color": "#E8F5E9", "border": "#A5D6A7"},
-        "medication": {"icon": "💊", "label": "用药", "color": "#FFF3E0", "border": "#FFCC80"},
-        "item": {"icon": "🔑", "label": "物品", "color": "#E3F2FD", "border": "#90CAF9"},
-        "family": {"icon": "👨‍👩‍👧‍👦", "label": "家人", "color": "#FCE4EC", "border": "#F48FB1"},
-        "habit": {"icon": "🌱", "label": "习惯", "color": "#F1F8E9", "border": "#AED581"},
-        "emotion": {"icon": "❤️", "label": "情绪", "color": "#FBE9E7", "border": "#FFAB91"},
-    }
-
-    grouped = {}
-    for e in events:
-        t = e.get("type", "other")
-        if t not in grouped:
-            grouped[t] = []
-        grouped[t].append(e)
-
-    html_parts = []
-    for idx, t_key in enumerate(["health", "medication", "item", "family", "habit", "emotion"]):
-        items = grouped.get(t_key, [])
-        if not items:
-            continue
-        info = type_info.get(t_key, {"icon": "📌", "label": "其他", "color": "#F5F5F5", "border": "#BDBDBD"})
-
-        # 取最近5条
-        recent = items[-5:]
-        count = len(items)
-
-        entries_html = '<div class="timeline" style="margin-top:4px;">'
-        for e in reversed(recent):
-            time_str = datetime.fromtimestamp(e["time"]).strftime('%m-%d %H:%M')
-            importance = e.get("importance", "normal")
-            imp_star = "⭐" if importance == "high" else ""
-            dot_color = "#E06060" if importance == "high" else info["border"]
-            entries_html += f"""
-            <div class="t-item" style="padding:4px 0 4px 16px;font-size:15px;position:relative;border-left:2px solid {dot_color};margin-bottom:2px;">
-                <span style="position:absolute;left:-5px;top:9px;width:8px;height:8px;border-radius:50%;background:{dot_color};"></span>
-                {imp_star} {e['content']}
-                <span style="color:#aaa;font-size:12px;margin-left:4px;">{time_str}</span>
-            </div>"""
-        entries_html += '</div>'
-
-        # 折叠面板
-        cid = f"mt{idx}"
-        html_parts.append(f"""
-        <div style='background:{info["color"]};border:1px solid {info["border"]};border-radius:10px;margin-bottom:8px;overflow:hidden;'>
-            <input type="checkbox" id="{cid}" checked style="display:none;">
-            <label for="{cid}" style="display:flex;align-items:center;justify-content:space-between;padding:8px 10px;cursor:pointer;font-size:15px;font-weight:bold;user-select:none;">
-                <span>{info["icon"]} {info["label"]} <span style="font-size:12px;color:#999;">{count}条</span></span>
-                <span class="fold-icon" style="font-size:12px;color:#999;transition:transform 0.2s;">▼</span>
-            </label>
-            <div class="mc" style="padding:0 8px 8px;">
-                {entries_html}
-            </div>
-        </div>
-        <style>
-            /* 折叠逻辑 */
-            #{cid}:not(:checked) ~ .mc {{ display: none; }}
-            #{cid}:checked ~ label .fold-icon {{ transform: rotate(180deg); }}
-        </style>
-        """)
-
-    return "".join(html_parts)
 
 # ========== 语音识别与合成（火山引擎）==========
 def resample_audio(audio_data, orig_sr, target_sr=16000):
@@ -733,6 +660,51 @@ def deepseek_chat_msgs(messages, max_tokens=300):
     print(f"DeepSeek调用失败: {last_err}")
     return ""
 
+# ========== 记忆系统（事件流→记忆库→画像，见 memory_system.py） ==========
+MEMORY_BANK_FILE = "memory_bank.json"
+
+def memory_llm(prompt):
+    """记忆抽取/反思用 LLM：优先 DeepSeek（快、JSON 稳），失败回退本地 3B 贪心解码。
+    记忆抽取在后台线程异步跑，不阻塞聊天。"""
+    txt = deepseek_chat_msgs([{"role": "user", "content": prompt}], max_tokens=500)
+    if txt:
+        return txt
+    try:
+        with MODEL_LOCK:
+            full = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
+            inputs = _tokenizer(full, return_tensors="pt").to(_model.device)
+            with torch.no_grad():
+                out = _model.generate(**inputs, max_new_tokens=160, do_sample=False)
+        return _tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
+    except Exception as e:
+        print(f"记忆LLM本地回退失败: {e}")
+        return ""
+
+memory_bank = MemoryBank(MEMORY_BANK_FILE, llm=memory_llm)
+_n_migrated = memory_bank.import_legacy_events(MEMORY_EVENTS_FILE)
+if _n_migrated:
+    print(f"📥 已从旧版关键词事件导入 {_n_migrated} 条情节记忆")
+
+# 记忆抽取队列：聊天返回后再后台抽取，不拖慢回复速度
+_memory_queue = deque()
+
+def _memory_worker():
+    while True:
+        try:
+            if _memory_queue:
+                u, a = _memory_queue.popleft()
+                memory_bank.observe(u, a)
+            else:
+                time.sleep(2)
+        except Exception as e:
+            print(f"记忆抽取异常: {e}")
+            time.sleep(1)
+
+Thread(target=_memory_worker, daemon=True).start()
+
+def get_memory_panel_html():
+    return memory_bank.panel_html()
+
 # ========== 对话核心逻辑 ==========
 def extract_text(content):
     """提取纯文本（兼容 Gradio 的 str / {'text': ...} / [{'type': 'text', ...}, ...] 等嵌套格式）"""
@@ -764,7 +736,20 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         base_prompt = PROMPT_CARING
     else:
         base_prompt = PROMPT_PRACTICAL
-    system_content = base_prompt + f"\n当前称呼：{call_name}"
+    # 称呼强约束：小模型聊到"孙子"等词时易顺嘴叫错性别（爷爷↔奶奶），
+    # 显式给出性别+正例+禁令；本地/DeepSeek 两条生成路径共用此 system
+    wrong_call = "奶奶" if gender == "女" else "爷爷"
+    system_content = (base_prompt +
+                      f"\n【称呼规则】你陪伴的是一位{'女' if gender == '女' else '男'}性老人，"
+                      f"全程只能称呼TA「{call_name}」"
+                      f"（例如：{call_name}，您今天气色真好），"
+                      f"绝对不能把TA叫成「{wrong_call}」。")
+
+    # 记忆检索：三因子（新近性×重要性×相关性）取相关记忆注入上下文——
+    # "上次您说膝盖疼，这几天好点没？"的"被记住"体验由此而来
+    mem_ctx = memory_bank.build_chat_context(user_input)
+    if mem_ctx:
+        system_content += f"\n{mem_ctx}"
 
     # 统一 chat_history 为纯文本 dict（extract_text 为模块级函数）
     internal_history = []
@@ -789,6 +774,16 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         if is_first_msg:
             Thread(target=generate_title_async, args=(conv_id, save_history), daemon=True).start()
         # 语音播报放到 .then 后置事件（play_reply_audio），不阻塞文字显示
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
+    # 记忆主动确认的答复（上一轮末尾小忆问过"您之前说X是Y，是吧？"）：
+    # 分类"对/不是/叫新值"走确定性闭环，不相关则放行给正常聊天
+    conf_reply = memory_bank.resolve_confirm_reply(
+        user_input, UI_STATE["personality"], user_memory["call_name"])
+    if conf_reply is not None:
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": conf_reply}]
+        save_conversation(conv_id, save_history)
         return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
     # 联网搜索：时效性/事实性问题先搜 Bing，再让 DeepSeek 结合资料回答
@@ -820,7 +815,7 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             prompt += f"<|im_start|>user\n{user_input}<|im_end|><|im_start|>assistant\n"
 
             inputs = _tokenizer(prompt, return_tensors="pt").to(_model.device)
-            with torch.no_grad():
+            with MODEL_LOCK, torch.no_grad():
                 outputs = _model.generate(**inputs,
                     max_new_tokens=300 if ON_GPU else 96,  # CPU 上控制长度保响应速度
                     temperature=0.9, top_p=0.95, do_sample=True,
@@ -837,6 +832,18 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
     except Exception as e:
         print(f"推理错误: {e}")
         bot_reply = f"{call_name}，我有点听不清楚，您再说一遍好吗？"
+
+    # 性别称呼保险丝：模型若仍叫错（爷爷↔奶奶），按呼语规则确定性纠正
+    bot_reply = fix_address(bot_reply, call_name, gender, surname)
+
+    # 记忆主动确认（冷启动节制：前几轮不问；全局30分钟冷却与每条最多2次在模块内控制）
+    if len(internal_history) >= 2:
+        conf_q = memory_bank.pop_confirm_question(UI_STATE["personality"], call_name)
+        if conf_q:
+            bot_reply += f"\n{conf_q}"
+
+    # 本轮对话入记忆抽取队列，后台 LLM 结构化抽取原子事实（不阻塞回复）
+    _memory_queue.append((user_input, bot_reply))
 
     is_first_msg = len(chat_history) <= 1
     save_history = internal_history + [{"role":"user","content":user_input},{"role":"assistant","content":bot_reply}]
@@ -946,7 +953,7 @@ def llm_extract_intent(user_input):
                   f"<|im_start|>user\n{user_input}<|im_end|>"
                   f"<|im_start|>assistant\n")
         inputs = _tokenizer(prompt, return_tensors="pt").to(_model.device)
-        with torch.no_grad():
+        with MODEL_LOCK, torch.no_grad():
             out = _model.generate(**inputs, max_new_tokens=48, do_sample=False)
         txt = _tokenizer.decode(out[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
         m = re.search(r"\{.*\}", txt, re.S)
@@ -1264,9 +1271,10 @@ def build_reminder_audio(text, is_muted):
         return None
 
 def poll_reminder_events(chat, is_muted, conv_id):
-    """轮询调度队列：把到点的提醒推进聊天窗，播放提示音/语音，刷新提醒面板"""
+    """轮询调度队列：把到点的提醒推进聊天窗，播放提示音/语音，刷新提醒与记忆面板"""
     if not reminder_queue:
-        return gr.update(), gr.update(), gr.update()
+        # 空转时也顺带刷新记忆面板（后台记忆抽取是异步的，面板靠这里追平）
+        return gr.update(), gr.update(), gr.update(), gr.update(value=get_memory_panel_html())
     fired = []
     while reminder_queue:
         fired.append(reminder_queue.popleft())
@@ -1276,7 +1284,7 @@ def poll_reminder_events(chat, is_muted, conv_id):
         chat = chat + [{"role": "assistant", "content": item["message"]}]
     save_conversation(conv_id, chat)
     audio = build_reminder_audio(fired[-1]["message"], is_muted)
-    return chat, audio, gr.update(value=get_reminders_panel_html())
+    return chat, audio, gr.update(value=get_reminders_panel_html()), gr.update(value=get_memory_panel_html())
 
 def get_reminders_panel_html():
     now = time.time()
@@ -1403,6 +1411,7 @@ os.makedirs(TEMP_AUDIO_DIR, exist_ok=True)
 # 启动时备份历史文件
 backup_file(HISTORY_FILE)
 backup_file(MEMORY_EVENTS_FILE)
+backup_file(MEMORY_BANK_FILE)
 
 # 引入 prompt 定义（简短版，与训练数据一致）
 PROMPT_PRACTICAL = "你是小忆，一位踏实稳重、真诚靠谱的晚辈。说话温和耐心，用简短自然的口语。"
@@ -1414,6 +1423,28 @@ def get_call_name(surname, gender):
     if s:
         return f"{s}{'奶奶' if gender == '女' else '爷爷'}"
     return "奶奶" if gender == '女' else "爷爷"
+
+def fix_address(reply, call_name, gender, surname=""):
+    """性别称呼保险丝：模型叫错（爷爷↔奶奶）时确定性纠正。
+    只处理"呼语"用法（错称紧跟您/你/标点、姓+错称），负向断言保护
+    "您爷爷""老爷爷""邻居李爷爷"等指代他人的用法。"""
+    if not reply:
+        return reply
+    wrong = "爷爷" if gender == "女" else "奶奶"
+    if wrong not in reply or call_name == wrong:
+        return reply
+    # 1) 错称+您/你："爷爷您歇着" → "李奶奶您歇着"
+    reply = re.sub(rf"(?<![您我他她它]){wrong}(?=[您你])", call_name, reply)
+    # 2) 姓+错称+呼号："李爷爷，" → "李奶奶，"（指代用法已被断言排除）
+    s = (surname or "").strip()
+    if s:
+        reply = re.sub(rf"(?<![您我他她它邻位说念老]){s}{wrong}(?=[，。！？!?])",
+                       call_name, reply)
+    # 3) 句界后的独立呼语："...！爷爷，您..." → "...！李奶奶，您..."
+    #    前瞻标点保证只匹配纯呼语，"从前，爷爷和孙子"这类叙述不误伤
+    reply = re.sub(rf"((?:^|[。！？～，\n])\s*){wrong}(?=[，。！？!?])",
+                   rf"\g<1>{call_name}", reply)
+    return reply
 
 def check_active_trigger():
     # 已设有正式的吃药提醒任务时，不再用关键词猜测重复打扰
@@ -1472,9 +1503,9 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
                 with gr.Row():
                     delete_btn = gr.Button("🗑️ 删除", variant="stop", size="sm")
                     new_conv_btn = gr.Button("➕ 新对话", variant="secondary", size="sm")
-                # 重要事件展示
-                gr.Markdown("📝 **重要事件**")
-                events_display = gr.HTML(value=get_recent_events_display(), elem_classes="event-box")
+                # 记忆与画像（事件流→记忆库→画像）
+                gr.Markdown("🧠 **记忆与画像**")
+                events_display = gr.HTML(value=get_memory_panel_html(), elem_classes="event-box")
                 # 提醒事项
                 gr.Markdown("⏰ **提醒事项**")
                 reminders_display = gr.HTML(value=get_reminders_panel_html(), elem_classes="event-box")
@@ -1509,14 +1540,14 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
         audio_path = None if muted else text_to_speech(welcome_msg)
         global last_user_interaction_time
         last_user_interaction_time = time.time()
-        return True, surname_val, gender_val, p, gr.update(visible=False), gr.update(visible=True), chat_history, new_id, audio_path, gr.update(choices=get_conversation_list_display()), get_recent_events_display(), get_reminders_panel_html()
+        return True, surname_val, gender_val, p, gr.update(visible=False), gr.update(visible=True), chat_history, new_id, audio_path, gr.update(choices=get_conversation_list_display()), get_memory_panel_html(), get_reminders_panel_html()
 
     btn.click(enter_chat, [s_ipt, g_ipt, p_ipt, is_muted],
               [ready, surname, gender, personality, setup_view, main_view, chat, current_conv_id, audio_output, history_dropdown, events_display, reminders_display])
 
     # 文字/语音交互后刷新事件与提醒面板
     def refresh_panels(*args):
-        return get_recent_events_display(), get_reminders_panel_html()
+        return get_memory_panel_html(), get_reminders_panel_html()
 
     # 文字提交（语音播报放最后：文字先显示，再合成音频）
     txt.submit(chat_response, [txt, chat, surname, gender, is_muted, personality, current_conv_id, history_dropdown],
@@ -1556,9 +1587,9 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
     # 定时器
     gr.Timer(30).tick(inject_proactive_message, [chat, is_muted, current_conv_id], [chat, audio_output])
     gr.Timer(30).tick(clean_old_audio_files, [])
-    # 提醒调度轮询：到点的提醒推进聊天窗 + 播报 + 刷新提醒面板
+    # 提醒调度轮询：到点的提醒推进聊天窗 + 播报 + 刷新提醒/记忆面板
     gr.Timer(15).tick(poll_reminder_events, [chat, is_muted, current_conv_id],
-                      [chat, audio_output, reminders_display])
+                      [chat, audio_output, reminders_display, events_display])
 
 if __name__ == "__main__":
     demo.launch(server_port=7861, share=False, css=custom_css)

@@ -30,6 +30,16 @@ backups/
 # 提醒任务运行时数据
 reminders.json
 
+# 记忆系统运行时数据（用户画像随用随建，不入库）
+memory_bank.json
+memory_events.json
+
+# 论文调研资料（本地 40MB，不放仓库）
+papers/
+paper_notes/
+.paper_notes/
+.paper_reading/
+
 # 本地密钥（不入库，防止公开仓库泄露）
 local_secrets.json
 

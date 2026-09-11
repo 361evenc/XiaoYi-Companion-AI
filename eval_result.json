@@ -1,0 +1,616 @@
+{
+  "eval_day": 12,
+  "retrieve_k": 5,
+  "modes": {
+    "offline": {
+      "personas": [
+        {
+          "label": "offline-关键词抽取",
+          "persona": "张桂兰（外向健谈，爱聊孙子）",
+          "facts": 4,
+          "episodes": 6,
+          "reflections": 0,
+          "n_probes": 7,
+          "acc@1": 5,
+          "acc@5": 5,
+          "n_pos": 6,
+          "answer": 4,
+          "violations": 0,
+          "coherence": 1.0,
+          "ctx_avg_lines": 4.0,
+          "details": [
+            {
+              "query": "我之前说孙子叫什么名字来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我闺女叫什么你还记得不？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我闺女在哪儿上班你说记得不？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我的血压最近怎么说的来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我这膝盖的事你还记得吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我对什么药过敏你还记得吗？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": false
+            },
+            {
+              "query": "我之前说孙子叫什么名字来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我闺女叫什么你还记得不？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我闺女在哪儿上班你说记得不？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我的血压最近怎么说的来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我这膝盖的事你还记得吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我对什么药过敏你还记得吗？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我之前看的那个电视剧咋样来着？",
+              "metric": "forgetting",
+              "leaked": []
+            }
+          ]
+        },
+        {
+          "label": "offline-关键词抽取",
+          "persona": "李建国（内敛务实，健康事务多）",
+          "facts": 6,
+          "episodes": 8,
+          "reflections": 0,
+          "n_probes": 7,
+          "acc@1": 5,
+          "acc@5": 5,
+          "n_pos": 6,
+          "answer": 4,
+          "violations": 0,
+          "coherence": 1.0,
+          "ctx_avg_lines": 5.33,
+          "details": [
+            {
+              "query": "我孙子叫什么名字来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我儿子在哪儿打工你还记得不？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我有什么忌口你知道吗？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我每天吃什么药？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我的老毛病都有啥你还记得吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我得糖尿病多少年了？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": false
+            },
+            {
+              "query": "我孙子叫什么名字来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我儿子在哪儿打工你还记得不？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我有什么忌口你知道吗？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我每天吃什么药？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我的老毛病都有啥你还记得吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我得糖尿病多少年了？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我之前下棋的事你还记得不？",
+              "metric": "forgetting",
+              "leaked": []
+            }
+          ]
+        },
+        {
+          "label": "offline-关键词抽取",
+          "persona": "王秀英（温柔絮叨，情感话题多）",
+          "facts": 6,
+          "episodes": 6,
+          "reflections": 0,
+          "n_probes": 8,
+          "acc@1": 4,
+          "acc@5": 5,
+          "n_pos": 7,
+          "answer": 5,
+          "violations": 0,
+          "coherence": 1.0,
+          "ctx_avg_lines": 5.14,
+          "details": [
+            {
+              "query": "我孙女叫什么名字来着？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": true
+            },
+            {
+              "query": "我说过爱听什么戏你还记得吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "谁每个礼拜六给我打电话来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "朵朵是不是快过生日了？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我这睡不着的毛病你知道吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我老伴走了几年了你还记得吗？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": false
+            },
+            {
+              "query": "我腿脚怎么说的来着？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": false
+            },
+            {
+              "query": "我孙女叫什么名字来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我说过爱听什么戏你还记得吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "谁每个礼拜六给我打电话来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "朵朵是不是快过生日了？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我这睡不着的毛病你知道吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我老伴走了几年了你还记得吗？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我腿脚怎么说的来着？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我之前说腌咸菜的事你还记得不？",
+              "metric": "forgetting",
+              "leaked": []
+            }
+          ]
+        }
+      ],
+      "aggregate": {
+        "acc@1": 0.7368,
+        "acc@5": 0.7895,
+        "answer": 0.6842,
+        "coherence": 1.0,
+        "ctx_avg_lines": 4.84
+      }
+    },
+    "deepseek": {
+      "personas": [
+        {
+          "label": "deepseek-LLM抽取",
+          "persona": "张桂兰（外向健谈，爱聊孙子）",
+          "facts": 9,
+          "episodes": 7,
+          "reflections": 6,
+          "n_probes": 7,
+          "acc@1": 5,
+          "acc@5": 5,
+          "n_pos": 6,
+          "answer": 5,
+          "violations": 0,
+          "coherence": 1.0,
+          "ctx_avg_lines": 5.67,
+          "details": [
+            {
+              "query": "我之前说孙子叫什么名字来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我闺女叫什么你还记得不？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我闺女在哪儿上班你说记得不？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我的血压最近怎么说的来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我这膝盖的事你还记得吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我对什么药过敏你还记得吗？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": false
+            },
+            {
+              "query": "我之前说孙子叫什么名字来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我闺女叫什么你还记得不？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我闺女在哪儿上班你说记得不？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我的血压最近怎么说的来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我这膝盖的事你还记得吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我对什么药过敏你还记得吗？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我之前看的那个电视剧咋样来着？",
+              "metric": "forgetting",
+              "leaked": []
+            }
+          ]
+        },
+        {
+          "label": "deepseek-LLM抽取",
+          "persona": "李建国（内敛务实，健康事务多）",
+          "facts": 13,
+          "episodes": 10,
+          "reflections": 9,
+          "n_probes": 7,
+          "acc@1": 4,
+          "acc@5": 6,
+          "n_pos": 6,
+          "answer": 6,
+          "violations": 0,
+          "coherence": 1.0,
+          "ctx_avg_lines": 6.0,
+          "details": [
+            {
+              "query": "我孙子叫什么名字来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我儿子在哪儿打工你还记得不？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": true
+            },
+            {
+              "query": "我有什么忌口你知道吗？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我每天吃什么药？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我的老毛病都有啥你还记得吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我得糖尿病多少年了？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": true
+            },
+            {
+              "query": "我孙子叫什么名字来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我儿子在哪儿打工你还记得不？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我有什么忌口你知道吗？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我每天吃什么药？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我的老毛病都有啥你还记得吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我得糖尿病多少年了？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我之前下棋的事你还记得不？",
+              "metric": "forgetting",
+              "leaked": []
+            }
+          ]
+        },
+        {
+          "label": "deepseek-LLM抽取",
+          "persona": "王秀英（温柔絮叨，情感话题多）",
+          "facts": 7,
+          "episodes": 6,
+          "reflections": 6,
+          "n_probes": 8,
+          "acc@1": 4,
+          "acc@5": 5,
+          "n_pos": 7,
+          "answer": 5,
+          "violations": 0,
+          "coherence": 1.0,
+          "ctx_avg_lines": 6.0,
+          "details": [
+            {
+              "query": "我孙女叫什么名字来着？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": true
+            },
+            {
+              "query": "我说过爱听什么戏你还记得吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "谁每个礼拜六给我打电话来着？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "朵朵是不是快过生日了？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我这睡不着的毛病你知道吧？",
+              "metric": "retrieval",
+              "hit@1": true,
+              "hit@5": true
+            },
+            {
+              "query": "我老伴走了几年了你还记得吗？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": false
+            },
+            {
+              "query": "我腿脚怎么说的来着？",
+              "metric": "retrieval",
+              "hit@1": false,
+              "hit@5": false
+            },
+            {
+              "query": "我孙女叫什么名字来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我说过爱听什么戏你还记得吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "谁每个礼拜六给我打电话来着？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "朵朵是不是快过生日了？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我这睡不着的毛病你知道吧？",
+              "metric": "answer",
+              "hit": true,
+              "intrusion": []
+            },
+            {
+              "query": "我老伴走了几年了你还记得吗？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我腿脚怎么说的来着？",
+              "metric": "answer",
+              "hit": false,
+              "intrusion": []
+            },
+            {
+              "query": "我之前说腌咸菜的事你还记得不？",
+              "metric": "forgetting",
+              "leaked": []
+            }
+          ]
+        }
+      ],
+      "aggregate": {
+        "acc@1": 0.6842,
+        "acc@5": 0.8421,
+        "answer": 0.8421,
+        "coherence": 1.0,
+        "ctx_avg_lines": 5.9
+      }
+    }
+  }
+}
