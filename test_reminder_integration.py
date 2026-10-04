@@ -23,7 +23,8 @@ from reminder import (ReminderStore, cn_to_int, parse_time_expr, humanize_ts,
                       escalated_message, missed_message, confirm_ack_message,
                       later_ack_message, clarify_time_message, list_message,
                       select_message, confirm_cancel_message, modify_ask_message,
-                      cancel_ack_message, abort_message, capability_message)
+                      cancel_ack_message, abort_message, capability_message,
+                      is_complaint_about_reminder, split_thing_note)
 
 SRC = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "app.py"),
            encoding="utf-8").read()
@@ -48,7 +49,10 @@ def build_ns(llm_stub, store_file):
               list_message=list_message, select_message=select_message,
               confirm_cancel_message=confirm_cancel_message,
               modify_ask_message=modify_ask_message, cancel_ack_message=cancel_ack_message,
-              abort_message=abort_message, capability_message=capability_message)
+              abort_message=abort_message, capability_message=capability_message,
+              is_complaint_about_reminder=is_complaint_about_reminder,
+              split_thing_note=split_thing_note,
+              deepseek_chat_msgs=lambda *a, **k: "")   # 离线桩：DeepSeek 不可用→落本地兜底
     ns.update(user_memory={"call_name": "王爷爷"},
               reminder_store=ReminderStore(store_file),
               UI_STATE={"personality": "暖心知心"},
@@ -57,6 +61,7 @@ def build_ns(llm_stub, store_file):
               PENDING_TTL=150, CONFIRM_WINDOW=6 * 3600,
               RE_REMIND_INTERVAL=120, MAX_RE_REMIND=2,
               save_conversation=lambda *a, **k: None,
+              get_memory_panel_html=lambda *a, **k: "<div>memory</div>",  # Q3 后 poll 依赖
               text_to_speech=lambda t: None,
               gr=types.SimpleNamespace(update=lambda **kw: ('update', kw)))
     exec(compile(BLOCK, 'app_block', 'exec'), ns)
@@ -161,7 +166,7 @@ def run():
             store.mark_fired(r['id'], time.time())
             ns['reminder_queue'].append(
                 {"message": trigger_message("暖心知心", "王爷爷", r["thing"])})
-        chat, audio, panel = ns['poll_reminder_events']([], True, 'it-conv')
+        chat, audio, panel, mempanel = ns['poll_reminder_events']([], True, 'it-conv')
         check(len(chat) == 1 and '吃药' in chat[0]['content']
               and saved and saved[-1][0] == 'it-conv',
               "B11 到点入队->轮询推进聊天+落库")
@@ -172,6 +177,30 @@ def run():
 
         html = ns['get_reminders_panel_html']()
         check(isinstance(html, str), "B14 提醒面板HTML")
+
+        # ---- C. Bug③④：抱怨拦截 + 超长事项拆分 ----
+        nsC = build_ns(lambda x: None, "itC.json")
+        handleC, storeC = nsC['try_handle_reminder'], nsC['reminder_store']
+        print("== C. Bug③④ 抱怨拦截 + 事项拆分 ==")
+
+        msgC = handleC("你还不提醒我")
+        check("对不起" in msgC or "疏忽" in msgC,
+              "C1 抱怨→道歉（无待办时请老人补一句，不反问时间）")
+        check("什么时候提醒" not in msgC, "C1b 绝不反问'您想让我什么时候提醒您呢'")
+
+        storeC.add('吃药', time.time() + 3600)
+        msgC2 = handleC("怎么不提醒我吃药")
+        check("吃药" in msgC2 and "什么时候提醒" not in msgC2 and "对不起" in msgC2,
+              "C2 有待办→道歉+核对事项")
+
+        msgC3 = handleC("五分钟后提醒我吃降压药，我的降压药放在门口的抽屉里了")
+        rr = [r for r in storeC.pending() if '吃降压药' in r['thing']]
+        check(bool(rr) and rr[0]['thing'] == '吃降压药'
+              and '门口的抽屉' in rr[0].get('note', ''),
+              "C3 超长事项拆分：主事项入库+备注留存")
+        tm = trigger_message("暖心知心", "王爷爷", rr[0]['thing'])
+        check('抽屉' not in tm, "C4 到点只念主事项，备注不上TTS")
+
         print(f"\n🎉 集成测试 {ok[0]} 项全部通过")
     finally:
         clean()

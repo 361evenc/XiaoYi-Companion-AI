@@ -84,7 +84,7 @@
 | 组件 | 技术 |
 |------|------|
 | Web 框架 | [Gradio](https://www.gradio.app/) |
-| 对话引擎 | 本地小忆 3B 模型（Qwen2.5 微调，无需训练，直接推理；GPU/CPU 自适应） |
+| 对话引擎 | 本地小忆 3B 模型（Qwen2.5 微调，无需训练，直接推理；GPU/CPU 自适应；模型文件缺失或未装 torch 时自动降级 DeepSeek API，应用照常可用） |
 | 联网搜索 | Bing 免费抓取 + DeepSeek 总结（密钥放 `local_secrets.json`） |
 | 语音识别（ASR） | 火山引擎语音识别 |
 | 语音合成（TTS） | 火山引擎语音合成（音色可配 `VOICE_TYPE`） |

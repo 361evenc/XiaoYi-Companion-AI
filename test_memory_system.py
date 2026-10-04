@@ -14,6 +14,7 @@ from memory_system import (
     MemoryBank, keyword_extract, similarity, retrievability,
     parse_llm_facts, parse_json_strings, classify_confirm_reply,
     humanize_ago, _strength_days, _reinforce,
+    match_symptoms, _value_grounded, _norm_key,
 )
 
 
@@ -188,7 +189,8 @@ class TestObserveAndFacts(TmpBank):
             {"field": "其他", "key": f"k{i}", "value": f"v{i}", "importance": 3, "confidence": 0.8}
             for i in range(8)], ensure_ascii=False)
         bank = self.make(llm=ScriptedLLM([many, "[]"]))
-        bank.observe("说了很多事", "")
+        # 值须能在原话中找到（Bug⑤ 溯源校验），故用户话里带上全部 v0..v7
+        bank.observe("说了很多事，v0、v1、v2、v3、v4、v5、v6、v7 都提到了", "")
         self.assertEqual(len(bank.facts), 3)   # 每轮最多3条
 
 
@@ -272,8 +274,9 @@ class TestReflection(TmpBank):
             '["张奶奶最近常念叨孙子豆豆"]',   # 反思
         ])
         bank = self.make(llm=llm)
-        for _ in range(3):
-            bank.observe("我孙子叫豆豆。", "")
+        texts = ["我孙子叫豆豆。", "我有高血压。", "我孙子叫豆豆。"]
+        for txt in texts:                      # 抽取值必须与当天原话对应（Bug⑤ 溯源）
+            bank.observe(txt, "")
             self.clock.advance(86400)
         self.assertEqual(len(bank.reflections), 1)
         self.assertEqual(bank.reflections[0]["text"], "张奶奶最近常念叨孙子豆豆")
@@ -491,6 +494,85 @@ class TestHelpers(unittest.TestCase):
         self.assertEqual(val, "小明")
         self.assertEqual(classify_confirm_reply("今天天气怎么样啊"), (None, None))
         self.assertEqual(classify_confirm_reply("很长的回答" * 20), (None, None))
+
+
+# ---------------- Bug②⑤ 回归：症状变体 + 值溯源校验 + 位置键归一 ----------------
+
+class TestSymptomVariants(unittest.TestCase):
+    """Bug②：头痛/头昏/偏头风等口语/书面/方言变体全部归一到规范症状名并触发"""
+
+    def test_variants_canonicalized(self):
+        for t, want in [("我前几天都说头痛了", ["头疼"]),
+                        ("最近偏头风又犯了", ["头疼"]),
+                        ("有点头昏", ["头疼"]),
+                        ("一到下午就眩晕", ["头晕"]),
+                        ("心里发慌", ["心慌"]),
+                        ("胸口发闷", ["胸闷"]),
+                        ("胃疼得厉害", ["胃不舒服"]),
+                        ("膝盖痛", ["膝盖疼"])]:
+            self.assertEqual(match_symptoms(t), want, t)
+
+    def test_longest_match_wins(self):
+        self.assertEqual(match_symptoms("偏头痛犯了"), ["头疼"])
+
+    def test_keyword_extract_health(self):
+        facts = keyword_extract("我前几天都说头痛了")
+        self.assertIn("头疼", [f["key"] for f in facts])
+
+
+class TestGrounding(TmpBank):
+    """Bug⑤a：抽取值必须能在老人原话里找到，找不到判为编造并丢弃"""
+
+    def test_hallucinated_value_rejected(self):
+        self.assertFalse(_value_grounded("床头柜透明塑料盒",
+                                         "我的降压药放在门口的抽屉里了"))
+
+    def test_grounded_value_accepted(self):
+        self.assertTrue(_value_grounded("门口的抽屉",
+                                        "我的降压药放在门口的抽屉里了"))
+        self.assertTrue(_value_grounded("豆豆，上初二", "我孙子叫豆豆，上初二了"))
+
+    def test_observe_drops_hallucination(self):
+        bank = self.make(llm=ScriptedLLM([json.dumps([
+            {"field": "物品", "key": "降压药放哪", "value": "床头柜透明塑料盒",
+             "quote": "", "importance": 8, "confidence": 0.9}], ensure_ascii=False)]))
+        out = bank.observe("我的降压药放在门口的抽屉里了")
+        self.assertEqual(out["new"], [])            # 编造值被拦截，不入库
+
+    def test_observe_keeps_grounded_and_backfills_quote(self):
+        bank = self.make(llm=ScriptedLLM([json.dumps([
+            {"field": "物品", "key": "降压药放哪", "value": "门口的抽屉",
+             "quote": "", "importance": 8, "confidence": 0.9}], ensure_ascii=False)]))
+        out = bank.observe("我的降压药放在门口的抽屉里了")
+        self.assertEqual(len(out["new"]), 1)
+        f = [x for x in bank.facts if x["key"] == "降压药位置"][0]
+        self.assertEqual(f["value"], "门口的抽屉")
+        self.assertTrue(f["quotes"])                # Bug⑤c：quote 自动回填原话
+
+    def test_location_key_unified_and_overridden(self):
+        """Bug⑤b：位置类不同键名归一到同一键；新值覆盖旧值，旧值入历史"""
+        bank = self.make(llm=ScriptedLLM([
+            json.dumps([{"field": "物品", "key": "降压药放哪", "value": "床头柜",
+                         "quote": "放在床头柜里", "importance": 6, "confidence": 0.9}],
+                       ensure_ascii=False),
+            json.dumps([{"field": "物品", "key": "降压药放在什么地方", "value": "门口的抽屉",
+                         "quote": "挪到门口的抽屉里了", "importance": 6, "confidence": 0.9}],
+                       ensure_ascii=False),
+        ]))
+        bank.observe("我的降压药放在床头柜里")
+        bank.observe("降压药我挪到门口的抽屉里了")
+        keys = [f["key"] for f in bank.facts]
+        self.assertEqual(keys.count("降压药位置"), 1)   # 两种键名归一到一条
+        f = [x for x in bank.facts if x["key"] == "降压药位置"][0]
+        self.assertEqual(f["value"], "门口的抽屉")       # 新的覆盖旧的
+        self.assertIn("床头柜", [h["value"] for h in f["history"]])
+
+    def test_norm_key_location_cases(self):
+        self.assertEqual(_norm_key("降压药放哪"), "降压药位置")
+        self.assertEqual(_norm_key("降压药存放"), "降压药位置")
+        self.assertEqual(_norm_key("降压药放在什么地方"), "降压药位置")
+        self.assertEqual(_norm_key("药的位置"), "药位置")     # 对象不同则不强行合并
+        self.assertEqual(_norm_key("孙子的名字"), "孙子")      # 普通键不受影响
 
 
 if __name__ == "__main__":

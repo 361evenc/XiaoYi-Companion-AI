@@ -83,3 +83,6 @@ uvicorn==0.46.0
 websockets==12.0
 yarl==1.23.0
 python-dotenv==1.1.0
+# 本地小忆3B模型推理（app.py 直接 import；未安装时自动降级 DeepSeek 对话，可安心跳过）
+torch>=2.2.0
+transformers>=4.45.0

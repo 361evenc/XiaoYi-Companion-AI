@@ -13,7 +13,8 @@ import reminder as R
 from reminder import (ReminderStore, cn_to_int, parse_time_expr, parse_duration_seconds,
                       humanize_ts, describe_reminder, match_confirmation,
                       fallback_extract, looks_like_reminder, repeat_desc,
-                      ack_set_message, trigger_message, list_message)
+                      ack_set_message, trigger_message, list_message,
+                      is_complaint_about_reminder, split_thing_note)
 
 
 # 固定"现在"：2026-09-06（周日）09:00
@@ -403,6 +404,64 @@ class TestMessages(unittest.TestCase):
     def test_repeat_desc(self):
         self.assertEqual(repeat_desc({"type": "daily"}), "每天")
         self.assertEqual(repeat_desc({"type": "weekly", "weekday": 2}), "每周三")
+
+
+# ---------------- Bug③④ 回归：抱怨拦截 + 事项拆分 ----------------
+
+class TestComplaintDetection(unittest.TestCase):
+    """Bug③：抱怨/质问句式识别——"你还不提醒我"是责备（表达类言语行为），
+    不是设提醒指令（指令类），不得反问"您想让我什么时候提醒您呢"。"""
+
+    def test_complaint_phrases(self):
+        for t in ("你还不提醒我", "怎么不提醒我吃药", "你怎么还不提醒我",
+                  "说好提醒我的呢", "怎么没提醒我", "你也没提醒我",
+                  "为什么不提醒我吃药", "你倒是提醒我啊"):
+            self.assertTrue(is_complaint_about_reminder(t), t)
+
+    def test_normal_set_not_flagged(self):
+        for t in ("五分钟后提醒我喝水", "提醒我吃药", "别忘了提醒我吃药",
+                  "每天早上八点提醒我量血压", "取消提醒", "帮我定个闹钟",
+                  "明天下午三点提醒我复查"):
+            self.assertFalse(is_complaint_about_reminder(t), t)
+
+
+class TestSplitThingNote(unittest.TestCase):
+    """Bug④：超15字事项拆分主事项+备注；到点只念主事项，备注进面板括号"""
+
+    def test_short_not_split(self):
+        self.assertEqual(split_thing_note("喝水"), ("喝水", ""))
+        self.assertEqual(split_thing_note("吃降压药"), ("吃降压药", ""))
+
+    def test_long_split(self):
+        main, note = split_thing_note("吃降压药，我的降压药放在门口的抽屉里了")
+        self.assertEqual(main, "吃降压药")
+        self.assertIn("门口的抽屉", note)
+
+    def test_no_punct_truncate(self):
+        main, note = split_thing_note("这是一个特别特别长的提醒事项没有标点符号呢")
+        self.assertTrue(main)
+        self.assertLessEqual(len(main), R.THING_MAX_LEN)
+
+    def test_store_note_roundtrip(self):
+        clock = FakeClock(TS)
+        with tempfile.TemporaryDirectory() as d:
+            store = ReminderStore(os.path.join(d, "r.json"), clock=clock)
+            r = store.add("吃降压药", TS + 300, note="降压药放在门口的抽屉里")
+            self.assertEqual(r["note"], "降压药放在门口的抽屉里")
+            desc = describe_reminder(r, NOW)
+            self.assertIn("吃降压药", desc)
+            self.assertIn("备注", desc)
+            # 到点播报只念主事项，不含备注（不上 TTS）
+            msg = trigger_message("踏实务实", "李奶奶", r["thing"])
+            self.assertIn("吃降压药", msg)
+            self.assertNotIn("抽屉", msg)
+
+    def test_fallback_extract_long_thing(self):
+        """规则回退路径抽出的超长事项同样能被拆分（调用方统一过闸）"""
+        data = fallback_extract("五分钟后提醒我吃降压药，我的降压药放在门口的抽屉里了")
+        main, note = split_thing_note(data["thing"])
+        self.assertEqual(main, "吃降压药")
+        self.assertIn("门口的抽屉", note)
 
 
 if __name__ == "__main__":

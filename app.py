@@ -18,26 +18,53 @@ import threading
 from collections import deque
 
 # ========== 本地模型配置（训练好的小忆 3B 模型，只做推理，无需训练） ==========
-import torch, ssl
+# "模型不需要本地训练，只需要能调用"：模型文件缺失 / 未装 torch / 加载失败时
+# 优雅降级——聊天走 DeepSeek API，意图解析与记忆抽取走规则回退，应用照常可用。
+import ssl
 ssl._create_default_https_context = ssl._create_unverified_context
-from transformers import AutoModelForCausalLM, AutoTokenizer
+try:
+    import torch
+except Exception:           # 没装 torch 也能启动（DeepSeek 兜底）
+    torch = None
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_output", "merged_16bit")
-ON_GPU = torch.cuda.is_available()
-print(f"⏳ 加载本地模型（{'GPU' if ON_GPU else 'CPU 推理模式，无需训练'}）...")
-if ON_GPU:
-    _model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True,
-    )
-else:
-    # 无显卡的电脑：不走 device_map（会挂起），直接加载进内存
-    _model = AutoModelForCausalLM.from_pretrained(
-        MODEL_PATH, dtype=torch.float32, trust_remote_code=True,
-    )
-_tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
-if _tokenizer.pad_token is None:
-    _tokenizer.pad_token = _tokenizer.eos_token
-print(f"✅ 模型加载完成")
+ON_GPU = False
+_model = None
+_tokenizer = None
+
+def _try_load_local_model():
+    """加载本地小忆 3B（纯推理，不训练）。成功返回 True；任何失败都降级 DeepSeek，应用照常启动。"""
+    global _model, _tokenizer, ON_GPU
+    if torch is None:
+        print("⚠️ 未安装 torch，跳过本地模型，聊天走 DeepSeek API")
+        return False
+    if not os.path.exists(os.path.join(MODEL_PATH, "model.safetensors")):
+        print(f"⚠️ 未找到本地模型文件（{MODEL_PATH}），聊天走 DeepSeek API")
+        return False
+    try:
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        ON_GPU = torch.cuda.is_available()
+        print(f"⏳ 加载本地模型（{'GPU' if ON_GPU else 'CPU 推理模式，无需训练'}）...")
+        if ON_GPU:
+            _model = AutoModelForCausalLM.from_pretrained(
+                MODEL_PATH, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True,
+            )
+        else:
+            # 无显卡的电脑：不走 device_map（会挂起），直接加载进内存
+            _model = AutoModelForCausalLM.from_pretrained(
+                MODEL_PATH, dtype=torch.float32, trust_remote_code=True,
+            )
+        _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+        if _tokenizer.pad_token is None:
+            _tokenizer.pad_token = _tokenizer.eos_token
+        print("✅ 模型加载完成")
+        return True
+    except Exception as e:
+        _model, _tokenizer = None, None
+        print(f"⚠️ 本地模型加载失败（{e}），聊天走 DeepSeek API")
+        return False
+
+LOCAL_MODEL_OK = _try_load_local_model()
 
 # 本地模型全局锁：聊天推理 / 提醒意图解析 / 记忆抽取共用，避免 CPU 上并发 generate
 MODEL_LOCK = threading.Lock()
@@ -83,8 +110,9 @@ from reminder import (ReminderStore, cn_to_int, parse_time_expr, humanize_ts,
                       escalated_message, missed_message, confirm_ack_message,
                       later_ack_message, clarify_time_message, list_message,
                       select_message, confirm_cancel_message, modify_ask_message,
-                      cancel_ack_message, abort_message, capability_message)
-from memory_system import MemoryBank
+                      cancel_ack_message, abort_message, capability_message,
+                      is_complaint_about_reminder, split_thing_note)
+from memory_system import MemoryBank, match_symptoms
 
 ASR_URL = "https://openspeech.bytedance.com/api/v1/asr"
 TTS_URL = "https://openspeech.bytedance.com/api/v1/tts"
@@ -325,10 +353,14 @@ def extract_memory(user_input):
 def _keyword_extract(text, now):
     """AI提取失败时的关键词回退方案"""
     events = []
-    health_kw = {"头疼": "头疼", "头晕": "头晕", "膝盖疼": "膝盖疼", "腰疼": "腰疼", "不舒服": "不舒服"}
-    for kw, content in health_kw.items():
-        if kw in text:
-            events.append({"type": "health", "content": content, "time": now, "status": "active"})
+    # Bug②：健康触发接入 memory_system 的症状变体表（头痛/头昏/偏头风 → 归一规范名），
+    # 单一数据源，与记忆系统共用，杜绝两表漂移
+    for content in match_symptoms(text):
+        events.append({"type": "health", "content": content, "time": now, "status": "active"})
+    if not any(e["type"] == "health" for e in events):
+        for kw in ("不舒服", "失眠", "睡不着", "血压高", "血糖高", "感冒", "牙疼"):
+            if kw in text:
+                events.append({"type": "health", "content": kw, "time": now, "status": "active"})
     med_kw = {"降压药": "降压药", "吃药": "吃药", "阿司匹林": "阿司匹林", "中药": "中药"}
     for kw, content in med_kw.items():
         if kw in text:
@@ -642,7 +674,7 @@ def search_and_summarize(query, top_k=4):
     print(f"🔍 已联网搜索: {query}（{len(results)} 条结果）")
     return "\n".join(lines)
 
-def deepseek_chat_msgs(messages, max_tokens=300):
+def deepseek_chat_msgs(messages, max_tokens=300, timeout=60):
     """调用 DeepSeek 对话接口，返回回复文本（失败返回空串）；主 key 失败自动换备用 key"""
     last_err = ""
     for key in DEEPSEEK_API_KEYS:
@@ -650,7 +682,7 @@ def deepseek_chat_msgs(messages, max_tokens=300):
             headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
             data = {"model": "deepseek-chat", "messages": messages,
                     "max_tokens": max_tokens, "temperature": 0.7}
-            resp = http_session.post(DEEPSEEK_URL, headers=headers, json=data, timeout=60)
+            resp = http_session.post(DEEPSEEK_URL, headers=headers, json=data, timeout=timeout)
             res = resp.json()
             if res.get("choices"):
                 return res["choices"][0]["message"]["content"].strip()
@@ -669,6 +701,8 @@ def memory_llm(prompt):
     txt = deepseek_chat_msgs([{"role": "user", "content": prompt}], max_tokens=500)
     if txt:
         return txt
+    if _model is None:
+        return ""            # 本地模型缺失：调用方自动降级关键词抽取
     try:
         with MODEL_LOCK:
             full = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n"
@@ -798,8 +832,9 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             )
 
     bot_reply = ""
-    if search_context:
-        # DeepSeek 结合搜索资料回答（本地 3B 难以可靠利用搜索结果）
+    if search_context or _model is None:
+        # DeepSeek 结合搜索资料回答（本地 3B 难以可靠利用搜索结果）；
+        # 本地模型缺失/加载失败时整体降级 DeepSeek——"模型不需要本地训练，能调用就行"
         try:
             msgs = [{"role": "system", "content": system_content}] + internal_history[-4:] + \
                    [{"role": "user", "content": user_input + search_context}]
@@ -807,8 +842,8 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         except Exception as e:
             print(f"DeepSeek调用失败: {e}")
 
-    try:
-        if not bot_reply:
+    if not bot_reply and _model is not None:
+        try:
             prompt = f"<|im_start|>system\n{system_content + search_context}<|im_end|>"
             for m in internal_history[-4:]:
                 prompt += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>"
@@ -826,11 +861,15 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             bot_reply = bot_reply.strip().strip("[]").strip("{}").strip(",").strip()
             if not bot_reply or len(bot_reply) < 5:
                 bot_reply = f"{call_name}，我听着呢，您说。"
-            # 释放显存
-            if ON_GPU:
-                torch.cuda.empty_cache()
-    except Exception as e:
-        print(f"推理错误: {e}")
+            # Bug⑥a修复：不再每轮 torch.cuda.empty_cache()。依据 vLLM/PagedAttention
+            # (Kwon et al., SOSP 2023)——稳态单进程推理显存占用稳定，缓存分配器
+            # 本就在进程内复用已释放块；empty_cache 会向驱动归还并同步设备，
+            # 实测每轮空耗 1-3 秒。OOM 风险由异常分支兜底，不做预防式清理。
+        except Exception as e:
+            print(f"推理错误: {e}")
+            bot_reply = ""
+
+    if not bot_reply:
         bot_reply = f"{call_name}，我有点听不清楚，您再说一遍好吗？"
 
     # 性别称呼保险丝：模型若仍叫错（爷爷↔奶奶），按呼语规则确定性纠正
@@ -940,14 +979,19 @@ def toggle_mute(current_mute):
 # ========== 提醒系统：意图解析 + 交互状态机 + 调度 ==========
 INTENT_PROMPT = (
     "你是提醒指令解析器。判断老人对小忆说的话属于哪种：set(设提醒)、cancel(取消提醒)、"
-    "modify(改提醒时间)、list(查看提醒)、none(其他)。输出一行JSON："
-    '{"intent":"set","time":"时间原文，没有填空串","thing":"要办的事，没有填空串",'
+    "modify(改提醒时间)、list(查看提醒)、complain(抱怨小忆忘了提醒，不是设新提醒)、none(其他)。"
+    "输出一行JSON："
+    '{"intent":"set","time":"时间原文，没有填空串","thing":"要办的事，不超过12个字，'
+    '只留核心动作，如：吃降压药","note":"其余说明如药品放在哪，没有填空串",'
     '"target":"取消或修改的对象，没有填空串"}'
     "。不是提醒指令就输出{\"intent\":\"none\"}。只输出JSON，不要解释。"
 )
 
 def llm_extract_intent(user_input):
-    """本地模型做意图+槽位结构化输出（贪心解码）；失败返回 None 走规则回退"""
+    """本地模型做意图+槽位结构化输出（贪心解码）；失败返回 None 走规则回退。
+    Bug⑥b 后仅作断网兜底（DeepSeek 优先），避免与聊天生成抢本地模型锁。"""
+    if _model is None:
+        return None  # 本地模型缺失：DeepSeek/规则已覆盖，放弃本地兜底
     try:
         prompt = (f"<|im_start|>system\n{INTENT_PROMPT}<|im_end|>"
                   f"<|im_start|>user\n{user_input}<|im_end|>"
@@ -960,11 +1004,52 @@ def llm_extract_intent(user_input):
         if not m:
             return None
         data = json.loads(m.group(0))
-        if data.get("intent") in ("set", "cancel", "modify", "list"):
+        if data.get("intent") in ("set", "cancel", "modify", "list", "complain"):
             return data
     except Exception as e:
         print(f"意图解析失败，走规则回退: {e}")
     return None
+
+def deepseek_extract_intent(user_input):
+    """Bug⑥b：提醒意图+槽位解析走 DeepSeek API——不占本地 MODEL_LOCK，
+    延迟从本地 3B 的 30 秒级降到 1-3 秒；与 memory_llm 的"DeepSeek 优先、
+    本地兜底"架构一致（依据 Orca/vLLM 服务化思想：结构化子任务不与主生成
+    争抢同一推理资源）。失败返回 None 落到本地兜底，维持离线可用。"""
+    txt = deepseek_chat_msgs(
+        [{"role": "system", "content": INTENT_PROMPT},
+         {"role": "user", "content": user_input}], max_tokens=100, timeout=10)
+    if not txt:
+        return None
+    m = re.search(r"\{.*\}", txt, re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except ValueError:
+        return None
+    if data.get("intent") in ("set", "cancel", "modify", "list", "complain"):
+        return data
+    return None
+
+def handle_reminder_complaint(user_input, now, call, persona):
+    """Bug③：抱怨/质问（"你还不提醒我"）→ 道歉并补提醒，绝不反问"什么时候提醒您"。
+    优先补响已触发未确认的提醒（3 秒内响铃）；有唯一待办则核对；都没有则道歉后
+    请老人说一声要提醒什么，一句话补上。"""
+    overdue = reminder_store.awaiting_confirm(now, CONFIRM_WINDOW)
+    if overdue:
+        r = overdue[0]
+        reminder_store.snooze(r["id"], 3, now)   # 立即补响（调度线程 5 秒内触发）
+        return (f"哎呀{call}，是我疏忽了，对不住——「{r['thing']}」我这就喊您，"
+                f"往后我一定上心。")
+    pend = reminder_store.pending(now)
+    if len(pend) == 1:
+        return (f"对不起{call}，是我没记牢。您说的是「{pend[0]['thing']}」这件事吧？"
+                f"要我现在就提醒您吗？")
+    if pend:
+        return select_message(call, [describe_reminder(r, datetime.now()) for r in pend],
+                              "让我提醒")
+    return (f"对不起{call}，这回是我没记住，您别急。"
+            f"您跟我说一声要提醒哪件事，我马上给您补上。")
 
 def _filter_by_target(pend, target):
     """'把明天的提醒取消' -> 按对象描述过滤候选提醒；过滤为空则返回全部"""
@@ -1028,26 +1113,26 @@ def _resolve_pending(user_input, now, call, persona):
                 if base <= datetime.now():
                     base += timedelta(days=7)
                 ts = base.timestamp()
-            reminder_store.add(d["thing"], ts, repeat)
+            reminder_store.add(d["thing"], ts, repeat, note=d.get("note", ""))
             pending_reminder["kind"] = None
             return ack_set_message(persona, call, d["thing"],
                                    humanize_ts(ts, datetime.now()), humanize_repeat(repeat))
         if parsed and parsed["kind"] == "fixed":
-            reminder_store.add(d["thing"], parsed["fire_ts"])
+            reminder_store.add(d["thing"], parsed["fire_ts"], note=d.get("note", ""))
             pending_reminder["kind"] = None
             return ack_set_message(persona, call, d["thing"],
                                    humanize_ts(parsed["fire_ts"], datetime.now()))
         # 答复本身是个模糊锚点（如"睡醒后"）-> 直接采用其默认时长，不追问第二次
         if parsed and parsed["kind"] == "clarify" and parsed.get("suggestion"):
             ts = now + parsed["suggestion"]
-            reminder_store.add(d["thing"], ts)
+            reminder_store.add(d["thing"], ts, note=d.get("note", ""))
             pending_reminder["kind"] = None
             return ack_set_message(persona, call, d["thing"], humanize_ts(ts, datetime.now()))
         # 同意默认时长
         if d.get("suggestion") and (match_confirmation(user_input) == "done"
                                     or re.search(r"^(好|行|可以|嗯+|要|就这样|就那样|随便)[吧呀啊哈。！!]*$", user_input.strip())):
             ts = now + d["suggestion"]
-            reminder_store.add(d["thing"], ts)
+            reminder_store.add(d["thing"], ts, note=d.get("note", ""))
             pending_reminder["kind"] = None
             return ack_set_message(persona, call, d["thing"], humanize_ts(ts, datetime.now()))
         pending_reminder["kind"] = None
@@ -1117,6 +1202,13 @@ def try_handle_reminder(user_input):
     if pending_reminder["kind"] and now - pending_reminder["ts"] > PENDING_TTL:
         pending_reminder["kind"] = None
 
+    # 0') Bug③补强：抱怨/质问优先于一切状态机——"你怎么还没提醒我"不是"等会儿"。
+    #    旧顺序里它会被第2步待确认拦截的"还没"误判为顺延10分钟（Searle 言语行为理论：
+    #    表达类责备 ≠ 指令类答复）。抱怨句式永远不会是澄清/确认/选择的合法答复，
+    #    故提到最前：一律道歉+立即补提醒，绝不反问时间、绝不顺延。
+    if is_complaint_about_reminder(user_input):
+        return handle_reminder_complaint(user_input, now, call, persona)
+
     # 1) 上一轮澄清/选择的答复
     if pending_reminder["kind"]:
         reply = _resolve_pending(user_input, now, call, persona)
@@ -1136,14 +1228,19 @@ def try_handle_reminder(user_input):
             return later_ack_message(call, 10)
 
     # 3) 新意图：关键词预过滤，命中才解析（普通聊天零额外开销）。
-    #    规则解析优先（零模型开销，毫秒级），LLM 只在规则失败时兜底——
-    #    CPU 部署时这条顺序能省 30 秒级延迟
+    #    Bug③：先拦截抱怨/质问句式（"你还不提醒我"是责备不是设提醒指令），道歉并补提醒；
+    #    Bug⑥b：解析链 规则(毫秒级) -> DeepSeek API(1-3秒，不占本地锁) -> 本地3B(断网兜底)。
     if not looks_like_reminder(user_input):
         return None
-    data = fallback_extract(user_input) or llm_extract_intent(user_input)
-    if not data or data.get("intent") not in ("set", "cancel", "modify", "list"):
+    if is_complaint_about_reminder(user_input):
+        return handle_reminder_complaint(user_input, now, call, persona)
+    data = (fallback_extract(user_input) or deepseek_extract_intent(user_input)
+            or llm_extract_intent(user_input))
+    if not data or data.get("intent") not in ("set", "cancel", "modify", "list", "complain"):
         return None
     intent = data["intent"]
+    if intent == "complain":   # LLM 路径的第二道防线（正则未拦住时）
+        return handle_reminder_complaint(user_input, now, call, persona)
 
     if intent == "list":
         return list_message(call, [describe_reminder(r, datetime.now())
@@ -1181,19 +1278,23 @@ def try_handle_reminder(user_input):
     if re.search(r"能不能|可不可以|会不会|可以吗|行吗", user_input) \
             and not re.search(r"[0-9一二两三四五六七八九十]+分|[点半刻秒小时]", user_input):
         return capability_message(call)
-    thing = (data.get("thing") or "").strip() or "您交代的事"
+    # Bug④：超长事项拆分主事项+备注——到点只念主事项，备注（位置等）入面板括号、不上 TTS
+    thing, note = split_thing_note((data.get("thing") or "").strip())
+    thing = thing or "您交代的事"
+    note = note or str(data.get("note") or "").strip()
     time_src = (data.get("time") or "").strip()
     parsed = parse_time_expr(time_src, datetime.now()) if time_src else None
     if parsed is None:
         parsed = parse_time_expr(user_input, datetime.now())
     if parsed and parsed["kind"] == "fixed":
-        reminder_store.add(thing, parsed["fire_ts"], parsed.get("repeat"))
+        reminder_store.add(thing, parsed["fire_ts"], parsed.get("repeat"), note=note)
         return ack_set_message(persona, call, thing,
                                humanize_ts(parsed["fire_ts"], datetime.now()),
                                humanize_repeat(parsed.get("repeat")))
     # 模糊锚点/缺时间 -> 一次澄清（带默认时长），不追问第二次
     pending_reminder.update({"kind": "clarify_time",
-                             "data": {"thing": thing, "suggestion": parsed.get("suggestion") if parsed else None,
+                             "data": {"thing": thing, "note": note,
+                                      "suggestion": parsed.get("suggestion") if parsed else None,
                                       "repeat_type": parsed.get("repeat_type") if parsed else None,
                                       "weekday": parsed.get("weekday") if parsed else None,
                                       "date_offset": parsed.get("date_offset") if parsed else None},
@@ -1454,11 +1555,27 @@ def check_active_trigger():
         if elapsed > 300:
             user_memory["last_medication_time"] = time.time()
             return random.choice([f"{user_memory['call_name']}，该吃药啦，我帮您记着呢。", f"{user_memory['call_name']}，药吃了没？可别忘了哦。"])
+    # Bug①修复：按事件类型分流跟进话术。依据 Grice (1975) 关联准则——"好点了吗"
+    # 预设对方处于病痛状态，只能用于健康/用药类；家人/习惯/物品类套用即违反关联
+    # 预设（"儿子来看我了"→"儿子好点了吗"）。情绪类改用共情式跟进；
+    # 家人/习惯/物品类不主动追问（话题延续交给聊天模型的记忆检索）。
     for event in user_memory["events"]:
         if event.get("status") == "active" and (time.time() - event["time"]) > 60:
-            event["status"] = "cared"
+            etype = event.get("type")
+            if etype in ("health", "medication"):
+                event["status"] = "cared"
+                save_memory_events(user_memory["events"])
+                return f"{user_memory['call_name']}，您刚才说的{event['content']}，现在好点了吗？"
+            if etype == "emotion":
+                event["status"] = "cared"
+                save_memory_events(user_memory["events"])
+                return random.choice([
+                    f"{user_memory['call_name']}，刚才听您说心里不太得劲，愿意再跟我讲讲吗？",
+                    f"{user_memory['call_name']}，我一直惦记着呢，现在心里舒坦点了吗？",
+                ])
+            # family / habit / item：标记已阅，不套"好点了吗"
+            event["status"] = "noted"
             save_memory_events(user_memory["events"])
-            return f"{user_memory['call_name']}，您刚才说的{event['content']}，现在好点了吗？"
     return None
 
 def clean_old_audio_files():

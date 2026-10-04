@@ -317,6 +317,47 @@ def looks_like_reminder(text):
         str(text or "")))
 
 
+# Bug③修复：抱怨/质问句式拦截。依据 Searle (1969) 言语行为理论——"你还不提醒我"
+# 的施事目的是责备（表达类），不是设定提醒（指令类），表层都含"提醒"但语用相反；
+# 规则与 LLM 两条解析路径都必须先排除该句式，否则误问"您想让我什么时候提醒您呢"。
+COMPLAINT_RE = re.compile(
+    r"(怎么|咋|为什么|为啥)\s*(不|没|还没|都不|也没)\s*(给\s*我\s*)?(提醒|叫)"
+    r"|还\s*(不|没)\s*(给\s*我\s*)?提醒"
+    r"|说好\s*(了)?\s*(要)?\s*提醒"
+    r"|(你|您)\s*(倒是|怎么还不|还不|都|也没|竟然|居然)\s*(没\s*)?(提醒|说)")
+
+
+def is_complaint_about_reminder(text):
+    """判定是否为对漏提醒的抱怨/质问（而非新的设提醒指令）"""
+    return bool(COMPLAINT_RE.search(str(text or "").strip()))
+
+
+# Bug④修复：超长事项拆分"主事项+备注"。依据：Gollwitzer & Sheeran (2006) 执行意图
+# 元分析（if-then 线索越纯净越有效）与 Koo et al. (2022) 老年前瞻记忆研究——
+# 到点播报只念主事项（≤15字），位置等修饰信息入备注、不上 TTS、面板括号展示。
+THING_MAX_LEN = 15
+
+
+def split_thing_note(thing):
+    """超过15字的事项拆成 (主事项, 备注)：
+    按标点分句取首句为主事项（老人口语习惯：主事在前、补充在后），其余入备注；
+    无标点时截前15字为主事项。≤15字原样返回、备注为空。"""
+    thing = re.sub(r"\s+", "", str(thing or ""))
+    if not thing:
+        return "", ""
+    if len(thing) <= THING_MAX_LEN:
+        return thing, ""
+    clauses = [c.strip("，。！？!?,.的了呢啊") for c in re.split(r"[，,；;。]", thing)]
+    clauses = [c for c in clauses if c]
+    if not clauses:
+        return thing[:THING_MAX_LEN], ""
+    main = clauses[0][:THING_MAX_LEN]
+    note = "；".join(clauses[1:])
+    if not note:
+        note = thing[len(main):].strip("，。！？!?,.的了呢啊")
+    return main, note
+
+
 def fallback_extract(text):
     """LLM 意图解析失败时的纯正则回退（意图+槽位）"""
     t = str(text or "")
@@ -340,7 +381,9 @@ def fallback_extract(text):
         time_expr = frag.group(0) if frag else t
         if per:  # 周期前缀必须进时间片段，否则"每天"会退化成一次性提醒
             time_expr = per.group(0) + (frag.group(0) if frag else "")
-    thing = re.sub(r"帮我|麻烦你?|劳驾|请你?|记得|别忘(?:了)?|到时[候]?|一下|每天|每日|天天|好吗|好不好|哈|哦|呀|吧|[，。！？!?,.]", "", t)
+    # Bug④：标点（，,；;。！）保留作为分句边界，供 split_thing_note 拆"主事项+备注"；
+    # 句尾标点由下方 strip 收尾
+    thing = re.sub(r"帮我|麻烦你?|劳驾|请你?|记得|别忘(?:了)?|到时[候]?|一下|每天|每日|天天|好吗|好不好|哈|哦|呀|吧", "", t)
     # 日期词不进事项：'明天提醒我复查' -> '复查'
     thing = re.sub(r"大后天|后天|明[天日]|今[天日]|(?:周|星期|礼拜)[一二三四五六日天]|[0-9]{1,2}月|[0-9]{1,2}[号日]", "", thing)
     thing = re.sub(r"提醒我?|叫我|定个|订个", "", thing)
@@ -437,7 +480,9 @@ def humanize_repeat(repeat):
 
 
 def describe_reminder(r, now=None):
-    """面板/播报用的一条提醒描述：'每天早上8点 吃药'"""
+    """面板/播报用的一条提醒描述：'每天早上8点 吃药（备注：药在抽屉里）'"""
+    note = str(r.get("note") or "").strip()
+    suffix = f"（备注：{note}）" if note else ""
     if r.get("repeat"):
         rd = repeat_desc(r["repeat"])
         h, mi = r["repeat"].get("hour", 0), r["repeat"].get("minute", 0)
@@ -457,8 +502,8 @@ def describe_reminder(r, now=None):
             seg, hh = "下午", h - 12
         else:
             seg, hh = "晚上", h - 12
-        return f"{rd}{seg}{hh}点{mi_str} {r['thing']}"
-    return f"{humanize_ts(r['time'], now)} {r['thing']}"
+        return f"{rd}{seg}{hh}点{mi_str} {r['thing']}{suffix}"
+    return f"{humanize_ts(r['time'], now)} {r['thing']}{suffix}"
 
 
 def ack_set_message(personality, call, thing, time_str, repeat_str=""):
@@ -618,11 +663,12 @@ class ReminderStore:
         os.replace(tmp, self.path)
 
     # ---- 基本操作 ----
-    def add(self, thing, fire_ts, repeat=None, source="chat"):
+    def add(self, thing, fire_ts, repeat=None, source="chat", note=""):
         now = self.clock()
         r = {
             "id": f"r{int(now * 1000)}{len(self.items) % 1000:03d}",
             "thing": thing,
+            "note": str(note or ""),   # Bug④：备注（位置等修饰信息），到点不播报、面板展示
             "time": float(fire_ts),
             "repeat": repeat,
             "status": "scheduled",

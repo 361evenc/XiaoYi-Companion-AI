@@ -45,6 +45,7 @@ __all__ = [
     "MemoryBank", "FIELDS", "FIELD_INFO", "keyword_extract", "similarity",
     "retrievability", "parse_llm_facts", "parse_json_strings",
     "humanize_ago", "classify_confirm_reply",
+    "SYMPTOM_VARIANTS", "match_symptoms",
 ]
 
 # ---------------------------------------------------------------- 字段表（老年场景定制）
@@ -90,6 +91,8 @@ EXTRACT_PROMPT = """你是老年陪伴系统的记忆抽取器。从【老人这
 5. confidence：老人说得越明确越高，含糊或转述给低分。
 6. 同一轮最多抽3条，没有可抽的就输出 []。
 7. 只输出JSON数组，不要任何解释文字。
+8. value 必须是老人原话里的原文措辞（可去掉语气词），不要改写、不要补全；找不到原话就不抽这条。
+9. 位置类信息（东西放在哪）的 key 统一写成"物品名+位置"，如"降压药位置"、"老花镜位置"，保证多次提及能互相覆盖。
 
 【老人这轮说的话】
 {user_text}
@@ -186,10 +189,20 @@ def _norm_field(field):
             return cand
     return "其他"
 
+# 位置类键的特征词（仅当键本身带位置语义时才触发归一，不影响普通键）
+_LOCATION_KEY_RE = re.compile(r"放在|搁在|存放在?|收在?|位置|在哪|哪里|哪儿|哪|啥地方|地方|什么|咋|嘛|放|搁|存|收")
+
 def _norm_key(key):
     k = re.sub(r"[\s，。,.！!？?：:、]+", "", str(key or ""))
     k = re.sub(r"(名字|姓名)$", "", k)     # "孙子的名字" -> "孙子的"
     k = k.rstrip("的")                     # "孙子的" -> "孙子"
+    # Bug⑤b：位置类键归一——"降压药放哪/药的位置/降压药存放" → "降压药位置"。
+    # 依据：Fellegi & Sunter (1969) record linkage——同一实体的不同表述须归一到
+    # 规范键再合并；_add_fact 的 (field,key) 冲突分支随即生效：新的覆盖旧的。
+    if _LOCATION_KEY_RE.search(k):
+        obj = _LOCATION_KEY_RE.sub("", k).rstrip("的")
+        if obj:
+            k = f"{obj[:6]}位置"
     return (k or "信息")[:12]
 
 def _norm_value(value):
@@ -208,6 +221,58 @@ def _clamp_conf(v, default=0.8):
         return float(max(0.0, min(1.0, float(v))))
     except (TypeError, ValueError):
         return default
+
+# ---------------------------------------------------------------- Bug⑤a：值溯源校验（治编造）
+# 依据：FactCC (Kryściński et al., EMNLP 2020) —— 生成内容必须有源文支撑跨度；
+# SummaC (Laban et al., ACL 2022) 的 NLI 蕴含判断在此简化为"子串+滑窗相似度"，
+# 零模型开销、离线可用，与本项目"无 LLM 也能跑"的约束一致。
+
+_GROUND_STRIP_RE = re.compile(r"[\s，。,.！!？?；;：:\"'“”（）()\[\]、的了呢啊吧么呀]")
+
+def _ground_norm(s):
+    """溯源比对用的归一：去口语尾字/标点 + 中文数字→阿拉伯（两侧对称，仅供比较）"""
+    s = _GROUND_STRIP_RE.sub("", str(s or ""))
+    for cn, ar in (("一", "1"), ("二", "2"), ("两", "2"), ("三", "3"), ("四", "4"),
+                   ("五", "5"), ("六", "6"), ("七", "7"), ("八", "8"), ("九", "9"),
+                   ("十", "10"), ("点", ".")):
+        s = s.replace(cn, ar)
+    return s
+
+def _value_grounded(value, user_text, min_sim=0.75):
+    """抽取值（按逗号/顿号分段）必须每段都能在老人原话中命中：
+    直接子串，或滑窗 bigram 相似度兜底（应对"上初二了/上初二"类尾差）。
+    找不到 → False（视为编造，调用方丢弃）。"""
+    text = _ground_norm(user_text)
+    if not text:
+        return False
+    parts = [p for p in re.split(r"[，,、;；/]", str(value or "")) if p.strip()]
+    if not parts:
+        return False
+    for p in parts:
+        p = _ground_norm(p)
+        if not p:
+            continue
+        if p in text:
+            continue
+        if len(p) >= 4:                    # 滑窗容差：窗口=值长+2
+            n = len(p)
+            hit = any(similarity(p, text[i:i + n + 2]) >= min_sim
+                      for i in range(0, max(1, len(text) - n + 3)))
+            if hit:
+                continue
+        return False
+    return True
+
+def _source_span(value, user_text):
+    """定位值在原话中的来源分句（可溯源原话片段）；找不到则退回首句前60字。"""
+    t = str(user_text or "")
+    p = _ground_norm(value)
+    if not p:
+        return t[:60]
+    for seg in re.split(r"[，,。！!？?；;]", t):
+        if p in _ground_norm(seg):
+            return seg.strip() or t[:60]
+    return t[:60]
 
 def _pick(d, *names):
     for n in names:
@@ -298,6 +363,36 @@ KW_HOBBY = ["养花", "浇花", "下棋", "打太极", "散步", "遛弯", "买�
 KW_ROUTINE = ["早起", "午睡", "早睡", "晨练"]
 KW_DIET = ["不吃辣", "不能吃甜", "忌口", "少吃糖", "不吃糖", "吃得清淡", "喝粥"]
 
+# Bug②修复：健康症状变体表——口语/书面/方言同义归一到规范症状名。
+# 依据：CBLUE (arXiv:2106.08087) CMeEE 医学实体归一；同一症状必须覆盖全部常见变体，
+# 否则"头痛/头昏/偏头风"等表述漏触发。本表是唯一数据源，app.py 主动关怀同源引用。
+SYMPTOM_VARIANTS = {
+    "头疼": ["头疼", "头痛", "偏头疼", "偏头痛", "偏头风", "头风", "头昏", "头昏沉", "头沉",
+             # 口语插入语变体（"头…疼"之间夹程度/频率词，子串匹配够不到）
+             "头有点疼", "头有点儿疼", "头很疼", "头特别疼", "头好疼", "头老是疼", "头总是疼"],
+    "头晕": ["头晕", "眩晕", "晕乎乎", "天旋地转", "站不稳",
+             "头有点晕", "头有点儿晕", "头很晕"],
+    "心慌": ["心慌", "心悸", "心跳得慌", "心里发慌", "心跳快"],
+    "胸闷": ["胸闷", "心口闷", "胸口发闷", "胸口疼", "气短", "喘不上气"],
+    "膝盖疼": ["膝盖疼", "膝盖痛", "腿弯疼", "膝关节疼", "膝盖不好"],
+    "腰疼": ["腰疼", "腰痛", "腰酸", "腰不舒服", "腰不好"],
+    "胃不舒服": ["胃疼", "胃痛", "肚子疼", "肚子痛", "胃口不好", "胃不舒服", "肚子不舒服"],
+}
+SYMPTOM_CANON = {}
+for _canon, _vs in SYMPTOM_VARIANTS.items():
+    for _v in _vs:
+        SYMPTOM_CANON.setdefault(_v, _canon)
+
+def match_symptoms(text):
+    """匹配症状变体，返回去重后的规范症状名列表。
+    按变体长度降序扫描，保证"偏头痛"先于"头痛"命中、不被短变体截断。"""
+    t = str(text or "")
+    hits = []
+    for v in sorted(SYMPTOM_CANON, key=len, reverse=True):
+        if v in t and SYMPTOM_CANON[v] not in hits:
+            hits.append(SYMPTOM_CANON[v])
+    return hits
+
 def keyword_extract(text, now=None):
     """LLM 不可用时的关键词抽取回退（覆盖老年陪伴高频场景）。
     键=匹配词本身，同一类别多条信息互不覆盖（"膝盖疼"与"血压高"共存）；
@@ -311,7 +406,12 @@ def keyword_extract(text, now=None):
         out.append({"field": "家庭", "key": m.group(1), "value": _norm_value(m.group(2)),
                     "quote": quote, "importance": 7, "confidence": 0.9})
 
+    # Bug②：先走变体表归一（头痛/头昏/偏头风 → 头疼），再补 KW_HEALTH_RE 的其余模式
+    health_hits = match_symptoms(t)
     for kw in dict.fromkeys(KW_HEALTH_RE.findall(t)):   # 去重保序
+        if kw not in health_hits and kw not in SYMPTOM_CANON:
+            health_hits.append(kw)
+    for kw in health_hits:
         out.append({"field": "健康", "key": kw, "value": kw,
                     "quote": quote, "importance": 5, "confidence": 0.85})
     for kw in KW_MED:
@@ -499,8 +599,21 @@ class MemoryBank:
                 print(f"[memory] LLM抽取失败，降级关键词: {e}")
         if not raw:
             raw = keyword_extract(user_text, now)
+        # Bug⑤a：值溯源校验——抽取值必须能在老人原话里找到，找不到视为编造，丢弃（留日志供评测统计）
+        grounded = []
+        for f in raw:
+            if _value_grounded(f.get("value"), user_text):
+                grounded.append(f)
+            else:
+                print(f"[memory] 丢弃疑似编造事实: {f.get('field')}/{f.get('key')}="
+                      f"{f.get('value')}（原话中找不到）")
+        raw = grounded
         if not raw:
             return {"new": [], "updated": [], "episode": None, "reflection": None}
+        # Bug⑤c：quote 缺失时回填来源分句，回答/画像均可溯源
+        for f in raw:
+            if not f.get("quote"):
+                f["quote"] = _source_span(f["value"], user_text)
 
         with self._lock:
             new_ids, updated_ids = [], []
@@ -657,6 +770,10 @@ class MemoryBank:
             lines.append("[你记得的关于老人的信息（聊天时自然地用，别生硬罗列）]")
             for f in facts:
                 item = f["value"] if f["key"] == f["value"] else f"{f['key']}：{f['value']}"
+                # Bug⑤c：注入原话出处，回答可溯源（依据 FactCC 支撑跨度思想）
+                q = (f.get("quotes") or [""])[0]
+                if q and _norm_value(q) != f["value"]:
+                    item += f"（您说过：{q[:30]}）"
                 lines.append(f"- {item}")
             for e in eps:
                 lines.append(f"- 老人提过：{e['text']}")
