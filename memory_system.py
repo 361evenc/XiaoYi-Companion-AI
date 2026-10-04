@@ -706,6 +706,25 @@ class MemoryBank:
             self.pending_confirms.pop(0)
         self.pending_confirms.append({"fact_id": fact_id, "ts": now})
 
+    # ---- 遗忘（"忘了吧"就真删记忆）----
+    def forget(self, pred):
+        """删除满足谓词 pred(item) 的事实与情节记忆，返回删除条数。
+        同时清理指向已删事实的待确认/进行中的确认，防止删除后还追问。
+        伦理依据：老人对自己的记忆有删除权（被遗忘权），明确请求必须真删、立即生效。"""
+        with self._lock:
+            before = len(self.facts) + len(self.episodes)
+            self.facts = [f for f in self.facts if not pred(f)]
+            self.episodes = [e for e in self.episodes if not pred(e)]
+            live_ids = {f["id"] for f in self.facts}
+            self.pending_confirms = [c for c in self.pending_confirms
+                                     if c["fact_id"] in live_ids]
+            if self.active_confirm and self.active_confirm["fact_id"] not in live_ids:
+                self.active_confirm = None
+            removed = before - (len(self.facts) + len(self.episodes))
+            if removed:
+                self._save()
+            return removed
+
     # ---- 检索（三因子）----
     REL_SIM_SCALE = 0.10   # 轻量相似度→[0,1] 的饱和尺度：明显相关≈0.10+，对齐 embedding 余弦量纲
 
