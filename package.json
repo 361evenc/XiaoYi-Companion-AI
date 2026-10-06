@@ -1,0 +1,9 @@
+{
+  "name": "xiaoyi-companion-ai",
+  "version": "1.0.0",
+  "private": true,
+  "description": "小忆陪伴助手（Python/Gradio 应用；本文件仅为预览托管提供 npm run dev 入口）",
+  "scripts": {
+    "dev": "venv\\Scripts\\python.exe app.py"
+  }
+}

@@ -34,6 +34,13 @@ reminders.json
 memory_bank.json
 memory_events.json
 
+# 主动关怀引擎运行时数据（频率个性化状态与反馈日志）
+proactive_state.json
+proactive_log.json
+
+# 情绪日志（运行时数据，含用户隐私，不入库）
+emotion_log.json
+
 # 论文调研资料（本地 40MB，不放仓库）
 papers/
 paper_notes/

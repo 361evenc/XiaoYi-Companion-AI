@@ -16,6 +16,7 @@ import shutil
 from threading import Thread, current_thread as _current_thread
 import threading
 from collections import deque
+import proactive
 
 # ========== 本地模型配置（训练好的小忆 3B 模型，只做推理，无需训练） ==========
 # "模型不需要本地训练，只需要能调用"：模型文件缺失 / 未装 torch / 加载失败时
@@ -28,6 +29,7 @@ except Exception:           # 没装 torch 也能启动（DeepSeek 兜底）
     torch = None
 
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_output", "merged_16bit")
+MODEL_INT8_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_output", "merged_int8.pt")
 ON_GPU = False
 _model = None
 _tokenizer = None
@@ -38,22 +40,28 @@ def _try_load_local_model():
     if torch is None:
         print("⚠️ 未安装 torch，跳过本地模型，聊天走 DeepSeek API")
         return False
-    if not os.path.exists(os.path.join(MODEL_PATH, "model.safetensors")):
-        print(f"⚠️ 未找到本地模型文件（{MODEL_PATH}），聊天走 DeepSeek API")
-        return False
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
         ON_GPU = torch.cuda.is_available()
-        print(f"⏳ 加载本地模型（{'GPU' if ON_GPU else 'CPU 推理模式，无需训练'}）...")
         if ON_GPU:
+            # 有显卡：加载 4bit 量化版（需 bitsandbytes）
+            if not os.path.exists(os.path.join(MODEL_PATH, "model.safetensors")):
+                print(f"⚠️ 未找到本地模型文件（{MODEL_PATH}），聊天走 DeepSeek API")
+                return False
+            print("⏳ 加载本地模型（GPU）...")
             _model = AutoModelForCausalLM.from_pretrained(
-                MODEL_PATH, device_map="auto", torch_dtype=torch.float16, trust_remote_code=True,
+                MODEL_PATH, device_map="auto", dtype=torch.float16, trust_remote_code=True,
             )
         else:
-            # 无显卡的电脑：不走 device_map（会挂起），直接加载进内存
-            _model = AutoModelForCausalLM.from_pretrained(
-                MODEL_PATH, dtype=torch.float32, trust_remote_code=True,
-            )
+            # 无显卡：加载烘焙好的 int8 动态量化模型——CPU 实测约 4.3 tok/s，
+            # 是 bnb-4bit（0.9 tok/s）的 5 倍；烘焙脚本见 _bake_int8.py
+            #（4bit 反量化为 fp32 后做 int8 动态量化，embedding 保持 fp32）
+            if not os.path.exists(MODEL_INT8_PATH):
+                print(f"⚠️ 未找到 int8 模型文件（{MODEL_INT8_PATH}），聊天走 DeepSeek API")
+                return False
+            print("⏳ 加载本地模型（CPU int8 推理模式，无需训练）...")
+            _model = torch.load(MODEL_INT8_PATH, map_location="cpu", weights_only=False)
+            _model.eval()
         _tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
         if _tokenizer.pad_token is None:
             _tokenizer.pad_token = _tokenizer.eos_token
@@ -64,7 +72,19 @@ def _try_load_local_model():
         print(f"⚠️ 本地模型加载失败（{e}），聊天走 DeepSeek API")
         return False
 
-LOCAL_MODEL_OK = _try_load_local_model()
+# 后台加载本地模型：Gradio 立即起服务（预览卡片 15 秒就绪预算），
+
+# 模型加载的 ~15 秒里聊天暂走 DeepSeek，就绪后自动切回本地模型。
+
+LOCAL_MODEL_OK = False
+
+def _load_model_bg():
+
+    global LOCAL_MODEL_OK
+
+    LOCAL_MODEL_OK = _try_load_local_model()
+
+Thread(target=_load_model_bg, daemon=True, name='local-model-loader').start()
 
 # 本地模型全局锁：聊天推理 / 提醒意图解析 / 记忆抽取共用，避免 CPU 上并发 generate
 MODEL_LOCK = threading.Lock()
@@ -765,6 +785,7 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
     global last_user_interaction_time
     if user_input and str(user_input).strip():
         last_user_interaction_time = time.time()
+        proactive.note_user_activity(user_input)   # 反馈闭环：熔断/拒绝/接受分类
     if not chat_history:
         chat_history = []
     if not user_input or str(user_input).strip() == "":
@@ -894,7 +915,7 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             inputs = _tokenizer(prompt, return_tensors="pt").to(_model.device)
             with MODEL_LOCK, torch.no_grad():
                 outputs = _model.generate(**inputs,
-                    max_new_tokens=300 if ON_GPU else 96,  # CPU 上控制长度保响应速度
+                    max_new_tokens=300 if ON_GPU else 160,  # int8 CPU 实测 4+ tok/s，放宽长度避免回复过短
                     temperature=0.9, top_p=0.95, do_sample=True,
                     repetition_penalty=1.2, no_repeat_ngram_size=4)
             bot_reply = _tokenizer.decode(outputs[0][inputs.input_ids.shape[1]:], skip_special_tokens=True)
@@ -1578,6 +1599,27 @@ PROMPT_PRACTICAL = "你是小忆，一位踏实稳重、真诚靠谱的晚辈。
 PROMPT_HUMOR = "你是小忆，一位活泼开朗、风趣俏皮的晚辈。语气轻松欢快，说话带一点小俏皮。"
 PROMPT_CARING = "你是小忆，一位温柔细腻、共情暖心的晚辈。语气温柔舒缓，善于倾听与安抚。"
 
+# ========== 主动关怀引擎（五信号→三道闸仲裁→记忆话题→人格话术→反馈闭环，见 proactive.py） ==========
+# 与 reminder.py 的分工：reminder 管"到点必响、确认闭环"的确定性事务；
+# proactive 管"可开可不开"的弹性陪伴开口，两者不重复打扰。
+proactive.init(
+    llm=deepseek_chat_msgs,
+    safety=ai_services.safety_filter,
+    persona_prompts={"踏实务实": PROMPT_PRACTICAL, "风趣幽默": PROMPT_HUMOR, "暖心知心": PROMPT_CARING},
+    get_persona=lambda: UI_STATE["personality"],
+    get_call_name=lambda: user_memory["call_name"],
+    last_interaction=lambda: last_user_interaction_time,
+    get_profile=lambda: memory_bank.profile_snapshot(),
+    get_keyword_events=lambda: user_memory["events"],
+    save_keyword_events=lambda evts: save_memory_events(evts),
+    get_emotion_log=load_emotion_log,
+    get_pending_reminders=lambda: reminder_store.pending(),
+    get_awaiting_reminders=lambda: reminder_store.awaiting_confirm(),
+    get_last_medication_time=lambda: user_memory["last_medication_time"],
+    touch_medication_time=lambda: user_memory.__setitem__("last_medication_time", time.time()),
+    weather_provider=None,   # 钩子保留：接入天气接口后，信号5的降温/雨雪×慢病关怀生效
+)
+
 def get_call_name(surname, gender):
     s = surname.strip() if surname else ""
     if s:
@@ -1607,35 +1649,14 @@ def fix_address(reply, call_name, gender, surname=""):
     return reply
 
 def check_active_trigger():
-    # 已设有正式的吃药提醒任务时，不再用关键词猜测重复打扰
-    has_med_reminder = any("药" in r.get("thing", "") for r in reminder_store.pending())
-    if user_memory["last_medication_time"] > 0 and not has_med_reminder:
-        elapsed = time.time() - user_memory["last_medication_time"]
-        if elapsed > 300:
-            user_memory["last_medication_time"] = time.time()
-            return random.choice([f"{user_memory['call_name']}，该吃药啦，我帮您记着呢。", f"{user_memory['call_name']}，药吃了没？可别忘了哦。"])
-    # Bug①修复：按事件类型分流跟进话术。依据 Grice (1975) 关联准则——"好点了吗"
-    # 预设对方处于病痛状态，只能用于健康/用药类；家人/习惯/物品类套用即违反关联
-    # 预设（"儿子来看我了"→"儿子好点了吗"）。情绪类改用共情式跟进；
-    # 家人/习惯/物品类不主动追问（话题延续交给聊天模型的记忆检索）。
-    for event in user_memory["events"]:
-        if event.get("status") == "active" and (time.time() - event["time"]) > 60:
-            etype = event.get("type")
-            if etype in ("health", "medication"):
-                event["status"] = "cared"
-                save_memory_events(user_memory["events"])
-                return f"{user_memory['call_name']}，您刚才说的{event['content']}，现在好点了吗？"
-            if etype == "emotion":
-                event["status"] = "cared"
-                save_memory_events(user_memory["events"])
-                return random.choice([
-                    f"{user_memory['call_name']}，刚才听您说心里不太得劲，愿意再跟我讲讲吗？",
-                    f"{user_memory['call_name']}，我一直惦记着呢，现在心里舒坦点了吗？",
-                ])
-            # family / habit / item：标记已阅，不套"好点了吗"
-            event["status"] = "noted"
-            save_memory_events(user_memory["events"])
-    return None
+    """30s 轮询入口：委托 proactive 引擎。旧版关键词猜测/健康跟进逻辑已迁入
+    proactive.py 信号层（_sig_health_followup），并按理念文档补齐冷却、
+    免打扰、动机阈值与反馈闭环。"""
+    try:
+        return proactive.tick()
+    except Exception as e:
+        print(f"主动关怀引擎异常: {e}")
+        return None
 
 def clean_old_audio_files():
     now = time.time()
@@ -1829,4 +1850,10 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
                       [chat, audio_output, reminders_display, events_display])
 
 if __name__ == "__main__":
-    demo.launch(server_port=7861, share=False, css=custom_css)
+    # 预览/外部托管时可经 --port / --host 或 PORT/HOST 环境变量覆盖端口与监听地址
+    import argparse
+    _ap = argparse.ArgumentParser()
+    _ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 7861)))
+    _ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
+    _args = _ap.parse_args()
+    demo.launch(server_name=_args.host, server_port=_args.port, share=False, css=custom_css)
