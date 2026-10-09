@@ -52,3 +52,6 @@ local_secrets.json
 
 # 音色试听文件（本地生成的临时音频）
 voice_samples/
+
+# IDE 目录
+.trae/

@@ -123,6 +123,25 @@ http_session = requests.Session()
 #   BV705 炀炀-自然对话 | BV406 梓梓-超自然 | BV007 亲切女声 | BV157 慈爱姥姥
 VOICE_TYPE = "BV705_streaming"
 
+# 任务5：三种人格配三种音色（火山引擎 TTS voice_type，可在控制台音色列表试听后替换）
+#   踏实务实 → BV705 炀炀（自然对话风，原默认男声）
+#   风趣幽默 → BV123 阳光青年（活泼男声，起伏丰富，适合幽默场景）
+#   暖心知心 → BV405 甜美小源（甜美可爱女声，智能助手系列，陪伴感强）
+PERSONA_VOICE = {
+    "踏实务实": "BV705_streaming",
+    "风趣幽默": "BV123_streaming",
+    "暖心知心": "BV405_streaming",
+}
+
+# 任务5：说话节奏随场景变化——情绪 → 语速映射（speed_ratio 范围 [0.2, 3.0]）
+#   愉悦快一点、平淡保持默认 0.8、低落/关心慢一点
+EMOTION_SPEED = {"愉悦": 0.95, "平淡": 0.8, "低落": 0.7}
+
+# 提醒播报专用参数：清晰有力（语速稍快、音调略抬、音量加大）
+REMINDER_TTS_PARAMS = {"speed": 0.85, "pitch": 1.05, "volume": 1.5}
+# 主动关怀专用参数：放慢放柔（关心慢一点）
+CARING_TTS_PARAMS = {"speed": 0.7, "pitch": 1.0, "volume": 1.3}
+
 from reminder import (ReminderStore, cn_to_int, parse_time_expr, humanize_ts,
                       humanize_repeat, describe_reminder, looks_like_reminder,
                       fallback_extract, match_confirmation, repeat_desc,
@@ -290,17 +309,25 @@ PENDING_TTL = 150            # 澄清/选择等待老人答复的有效期（秒
 CONFIRM_WINDOW = 6 * 3600    # 触发后可确认"办好了"的窗口
 
 reminder_store = ReminderStore(REMINDERS_FILE)
-UI_STATE = {"personality": "踏实务实"}
+UI_STATE = {"personality": "踏实务实", "last_emotion": "平淡"}
 pending_reminder = {"kind": None, "data": {}, "ts": 0.0}
 reminder_queue = deque(maxlen=20)
 
 # ========== 对话历史管理 ==========
+RECENT_TURNS = 20                 # 保留原文轮数
+RECENT_MSGS = RECENT_TURNS * 2     # 40 条消息（user+assistant 各一）
+
 def load_all_conversations():
     convs = load_json_safe(HISTORY_FILE, [])
+    for c in convs:
+        c.setdefault('summary', '')
+        c.setdefault('summary_until_index', 0)
+        c.setdefault('last_summarized_ts', 0.0)
     convs.sort(key=lambda x: x.get('updated', 0), reverse=True)
     return convs
 
-def save_conversation(conv_id, messages, title=None, update_title=False):
+def save_conversation(conv_id, messages, title=None, update_title=False,
+                       summary=None, summary_until_index=None):
     convs = load_all_conversations()
     now_ts = time.time()
     found = False
@@ -310,6 +337,16 @@ def save_conversation(conv_id, messages, title=None, update_title=False):
             convs[i]['updated'] = now_ts
             if update_title and title:
                 convs[i]['title'] = title
+            if summary is not None:
+                convs[i]['summary'] = summary
+                # summary_until_index 由调用方显式传入更稳健；
+                # 未传时按"已超出阈值则裁剪掉溢出部分"语义估算
+                if summary_until_index is not None:
+                    convs[i]['summary_until_index'] = summary_until_index
+                elif len(messages) > RECENT_MSGS:
+                    convs[i]['summary_until_index'] = len(messages) - RECENT_MSGS
+                # 否则保留原值，防止回退为 0
+                convs[i]['last_summarized_ts'] = now_ts
             found = True
             break
     if not found:
@@ -322,11 +359,43 @@ def save_conversation(conv_id, messages, title=None, update_title=False):
             'title': title,
             'messages': messages,
             'created': now_ts,
-            'updated': now_ts
+            'updated': now_ts,
+            'summary': summary or '',
+            'summary_until_index': summary_until_index or 0,
+            'last_summarized_ts': now_ts if summary is not None else 0.0,
         }
         convs.append(new_conv)
     convs.sort(key=lambda x: x.get('updated', 0), reverse=True)
     save_json_safe(HISTORY_FILE, convs)
+
+def _maybe_compress_history(conv_id, internal_history, call_name):
+    """溢出时增量摘要并裁剪 internal_history。
+    返回 (裁剪后的 internal_history, summary_str)。
+    失败时返回 (原 internal_history, "")，不修改 conv。
+    触发阈值 RECENT_MSGS+2：留出当前轮 user+assistant 的写入空间，
+    避免 save 后又因 +2 越界导致每轮重复触发摘要。"""
+    if len(internal_history) <= RECENT_MSGS + 2:
+        return internal_history, ""
+    convs = load_all_conversations()
+    conv = next((c for c in convs if c['id'] == conv_id), None)
+    if conv is None:
+        return internal_history, ""
+    old_summary = conv.get('summary', '')
+    old_sui = conv.get('summary_until_index', 0)
+    overflow = internal_history[:-RECENT_MSGS]
+    new_summary = ai_services.summarize_conversation_segment(
+        old_summary, overflow, call_name)
+    if not new_summary:
+        print(f"[summarize] 失败，保留原文 conv={conv_id}")
+        return internal_history, ""
+    trimmed = internal_history[-RECENT_MSGS:]
+    # summary_until_index 反映"messages 中已被摘要覆盖的下一条索引"
+    # = 旧值 + 本轮裁剪掉的条数
+    new_sui = old_sui + len(overflow)
+    # 立即写回，避免后续 save_conversation 覆盖回滚
+    save_conversation(conv_id, trimmed, summary=new_summary,
+                      summary_until_index=new_sui)
+    return trimmed, new_summary
 
 def delete_conversation_by_id(conv_id):
     convs = load_all_conversations()
@@ -487,13 +556,16 @@ def split_sentences(text):
         sentences.append(buf)
     return sentences if sentences else [text]
 
-def tts_request(text):
-    """单次调用火山 TTS，返回 wav 字节"""
+def tts_request(text, voice_type=None, speed=0.8, pitch=1.0, volume=1.3):
+    """单次调用火山 TTS，返回 wav 字节。
+    任务5：voice_type/speed/pitch/volume 参数化，支持人格音色与场景节奏"""
     headers = {"Authorization": f"Bearer; {VOLC_ACCESS_TOKEN}"}
     data = {
         "app": {"appid": VOLC_APP_ID, "token": VOLC_ACCESS_TOKEN, "cluster": "volcano_tts"},
         "user": {"uid": "xiaoyi_user"},
-        "audio": {"voice_type": VOICE_TYPE, "encoding": "wav", "speed_ratio": 0.8, "volume_ratio": 1.3, "pitch_ratio": 1.0, "rate": 16000},
+        "audio": {"voice_type": voice_type or VOICE_TYPE, "encoding": "wav",
+                  "speed_ratio": speed, "volume_ratio": volume,
+                  "pitch_ratio": pitch, "rate": 16000},
         "request": {"reqid": str(uuid.uuid4()), "text": text, "text_type": "plain", "operation": "query"}
     }
     resp = http_session.post(TTS_URL, headers=headers, json=data, timeout=15)
@@ -519,14 +591,15 @@ def concat_wav_bytes(wav_list, gap_sec=0.25):
                     wf_out.writeframes(b'\x00\x00' * int(16000 * gap_sec))
     return out.getvalue()
 
-def text_to_speech(text):
+def text_to_speech(text, voice_type=None, speed=0.8, pitch=1.0, volume=1.3):
     if not text or text.strip() == "":
         return None
     try:
         sentences = split_sentences(text)
         wav_list = []
         for s in sentences:
-            wav_bytes = tts_request(s)
+            wav_bytes = tts_request(s, voice_type=voice_type,
+                                    speed=speed, pitch=pitch, volume=volume)
             if wav_bytes:
                 wav_list.append(wav_bytes)
         if not wav_list:
@@ -728,6 +801,7 @@ ai_services.init(deepseek_chat_msgs)
 
 # ========== 记忆系统（事件流→记忆库→画像，见 memory_system.py） ==========
 MEMORY_BANK_FILE = "memory_bank.json"
+PROFILE_TXT_FILE = "用户画像.txt"   # 任务3：画像后台导出文件（界面不再展示画像卡片）
 
 def memory_llm(prompt):
     """记忆抽取/反思用 LLM：优先 DeepSeek（快、JSON 稳），失败回退本地 3B 贪心解码。
@@ -762,6 +836,9 @@ def _memory_worker():
             if _memory_queue:
                 u, a = _memory_queue.popleft()
                 memory_bank.observe(u, a)
+                # 任务3：画像写进 用户画像.txt（越用越全，后台静默更新）
+                memory_bank.export_profile_txt(
+                    PROFILE_TXT_FILE, user_memory.get("call_name", ""))
             else:
                 time.sleep(2)
         except Exception as e:
@@ -804,6 +881,7 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
                      "score": emo["score"], "note": emo["note"]})
     save_emotion_log(_emo_log)
     UI_STATE["personality"] = personality if personality in ("踏实务实", "风趣幽默", "暖心知心") else "踏实务实"
+    UI_STATE["last_emotion"] = emo["label"]      # 任务5：语音节奏随情绪（愉悦快/低落慢）
     if personality == "踏实务实":
         base_prompt = PROMPT_PRACTICAL
     elif personality == "风趣幽默":
@@ -838,6 +916,10 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             r, c = msg.get("role","user"), extract_text(msg.get("content",""))
             if r in ("user","assistant") and c.strip():
                 internal_history.append({"role": r, "content": c.strip()})
+
+    # 任务1：短期对话记忆——溢出时增量摘要并裁剪，所有出口共享压缩后历史
+    internal_history, history_summary = _maybe_compress_history(
+        conv_id, internal_history, call_name)
 
     # 顺带找回：「忘了吧」就真删记忆——关键词事件 + 记忆库（事实/情节）双层删除，
     # 直接回复不调模型（老人对自己的记忆有删除权，明确请求必须真删、立即生效）
@@ -899,7 +981,11 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         # DeepSeek 结合搜索资料回答（本地 3B 难以可靠利用搜索结果）；
         # 本地模型缺失/加载失败时整体降级 DeepSeek——"模型不需要本地训练，能调用就行"
         try:
-            msgs = [{"role": "system", "content": system_content}] + internal_history[-4:] + \
+            msgs = [{"role": "system", "content": system_content}]
+            if history_summary:
+                msgs.append({"role": "system",
+                             "content": f"【之前对话摘要】\n{history_summary}"})
+            msgs += internal_history[-RECENT_MSGS:] + \
                    [{"role": "user", "content": user_input + search_context}]
             bot_reply = deepseek_chat_msgs(msgs)
         except Exception as e:
@@ -907,8 +993,11 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
 
     if not bot_reply and _model is not None:
         try:
-            prompt = f"<|im_start|>system\n{system_content + search_context}<|im_end|>"
-            for m in internal_history[-4:]:
+            local_system = system_content + search_context
+            if history_summary:
+                local_system += f"\n【之前对话摘要】\n{history_summary}"
+            prompt = f"<|im_start|>system\n{local_system}<|im_end|>"
+            for m in internal_history[-RECENT_MSGS:]:
                 prompt += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>"
             prompt += f"<|im_start|>user\n{user_input}<|im_end|><|im_start|>assistant\n"
 
@@ -970,7 +1059,8 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
     return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
 def play_reply_audio(chat_history, is_muted):
-    """主流程返回后再合成语音（读取最后一条助手消息），避免 TTS 阻塞文字显示"""
+    """主流程返回后再合成语音（读取最后一条助手消息），避免 TTS 阻塞文字显示。
+    任务5：按当前人格选音色、按当轮情绪调语速（愉悦快一点、低落慢一点）"""
     if is_muted or not chat_history:
         return None
     last = chat_history[-1]
@@ -979,7 +1069,9 @@ def play_reply_audio(chat_history, is_muted):
         # 直接 str(content) 会把英文结构（type/text 等）读出来
         content = extract_text(last.get("content", "")).strip()
         if content:
-            return text_to_speech(content)
+            voice = PERSONA_VOICE.get(UI_STATE["personality"])
+            speed = EMOTION_SPEED.get(UI_STATE["last_emotion"], 0.8)
+            return text_to_speech(content, voice_type=voice, speed=speed)
     return None
 
 def process_mic_data(audio_b64, chat_history, surname, gender, is_muted, personality, conv_id, dropdown):
@@ -1044,7 +1136,9 @@ def inject_proactive_message(chat_history, is_muted, conv_id):
     if msg and (time.time() - last_user_interaction_time) > 15:
         chat_history.append({"role": "assistant", "content": msg})
         save_conversation(conv_id, chat_history)
-        audio_path = None if is_muted else text_to_speech(msg)
+        # 任务5：主动关怀放慢放柔（关心慢一点），音色仍随人格
+        audio_path = None if is_muted else text_to_speech(
+            msg, voice_type=PERSONA_VOICE.get(UI_STATE["personality"]), **CARING_TTS_PARAMS)
         return chat_history, audio_path
     return chat_history, None
 
@@ -1053,7 +1147,8 @@ def toggle_mute(current_mute):
     btn_text = "🔇 静音" if new_mute else "🔊 取消静音"
     audio_path = None
     if current_mute and not new_mute:
-        audio_path = text_to_speech("小忆语音已开启")
+        audio_path = text_to_speech("小忆语音已开启",
+                                    voice_type=PERSONA_VOICE.get(UI_STATE["personality"]))
     return new_mute, gr.update(value=btn_text), audio_path
 
 # ========== 提醒系统：意图解析 + 交互状态机 + 调度 ==========
@@ -1438,7 +1533,9 @@ def build_reminder_audio(text, is_muted):
         sr = 16000
         pieces = [_chime()]
         if not is_muted:
-            path = text_to_speech(text)
+            # 任务5：提醒播报清晰有力（语速稍快、音调略抬、音量加大）
+            path = text_to_speech(text, voice_type=PERSONA_VOICE.get(UI_STATE["personality"]),
+                                  **REMINDER_TTS_PARAMS)
             if path:
                 tsr, arr = _wav_to_numpy(path)
                 if tsr != sr and len(arr):
@@ -1581,7 +1678,14 @@ custom_css = """
         margin: 0 !important;
         min-height: 28px !important;
     }
+    /* 任务5：原全隐藏样式保留（备用），新增小型语音条样式——
+       Gradio Audio 原生自带播放/暂停按钮 + 可拖动进度条 + 时长显示 */
     .audio-hidden { height: 0 !important; overflow: hidden !important; margin: 0 !important; padding: 0 !important; position: absolute !important; opacity: 0 !important; pointer-events: none !important; }
+    .audio-bar { margin: 4px 0 6px !important; padding: 2px 6px !important;
+                 border: 1px solid #E0D3C0 !important; border-radius: 10px !important;
+                 background: #FFF9F0 !important; }
+    .audio-bar audio { height: 40px !important; }
+    .audio-bar .download-button { display: none !important; }
 """
 
 # ========== 全局变量 ==========
@@ -1711,7 +1815,6 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
     is_muted = gr.State(True)
     personality = gr.State("踏实务实")
     current_conv_id = gr.State(None)
-    audio_output = gr.Audio(autoplay=True, visible=True, elem_classes="audio-hidden")
 
     # 欢迎页
     with gr.Column(visible=True) as setup_view:
@@ -1735,8 +1838,8 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
                 with gr.Row():
                     delete_btn = gr.Button("🗑️ 删除", variant="stop", size="sm")
                     new_conv_btn = gr.Button("➕ 新对话", variant="secondary", size="sm")
-                # 记忆与画像（事件流→记忆库→画像）
-                gr.Markdown("🧠 **记忆与画像**")
+                # 记忆（事件流→记忆库；画像已改为后台导出 用户画像.txt，任务3）
+                gr.Markdown("🧠 **记忆**")
                 events_display = gr.HTML(value=get_memory_panel_html(), elem_classes="event-box")
                 # 提醒事项
                 gr.Markdown("⏰ **提醒事项**")
@@ -1753,7 +1856,14 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
                 gr.HTML('</div>')
             with gr.Column(scale=4):
                 gr.HTML('''<div class="top-bar"><div>🌸 小忆</div><div class="status-online"><div class="green-dot"></div> 陪伴中</div></div>''')
+                # 任务5补充：聊天中随时切换人格（同时切换音色），免刷新页面
+                persona_switch = gr.Dropdown(choices=["踏实务实", "风趣幽默", "暖心知心"],
+                                             value="踏实务实", label="小忆的性格（音色随之切换）",
+                                             container=False, interactive=True)
                 chat = gr.Chatbot(value=[], height=520, show_label=False)
+                # 语音播放器（隐藏：所有语音输出只播放声音，不显示可见组件）
+                audio_output = gr.Audio(autoplay=True, visible=True, show_label=False,
+                                        elem_classes="audio-hidden")
                 mic_status = gr.Markdown("", visible=True, elem_classes="mic-status")
                 with gr.Row(elem_classes="quick-btn-row"):
                     q1 = gr.Button("我今天挺好的", elem_classes="quick-btn")
@@ -1781,13 +1891,21 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
             welcome_msg += "\n" + greet
         chat_history = [{"role": "assistant", "content": welcome_msg}]
         new_id = str(int(time.time() * 1000))
-        audio_path = None if muted else text_to_speech(welcome_msg)
+        # 任务5修复：欢迎语音也用当前人格音色（原来固定默认音色，导致选不同人格听感相同）
+        audio_path = None if muted else text_to_speech(
+            welcome_msg, voice_type=PERSONA_VOICE.get(UI_STATE["personality"]))
         global last_user_interaction_time
         last_user_interaction_time = time.time()
-        return True, surname_val, gender_val, p, gr.update(visible=False), gr.update(visible=True), chat_history, new_id, audio_path, gr.update(choices=get_conversation_list_display()), get_memory_panel_html(), get_reminders_panel_html()
+        return True, surname_val, gender_val, p, gr.update(visible=False), gr.update(visible=True), chat_history, new_id, audio_path, gr.update(choices=get_conversation_list_display()), get_memory_panel_html(), get_reminders_panel_html(), gr.update(value=UI_STATE["personality"])
 
     btn.click(enter_chat, [s_ipt, g_ipt, p_ipt, is_muted],
-              [ready, surname, gender, personality, setup_view, main_view, chat, current_conv_id, audio_output, history_dropdown, events_display, reminders_display])
+              [ready, surname, gender, personality, setup_view, main_view, chat, current_conv_id, audio_output, history_dropdown, events_display, reminders_display, persona_switch])
+
+    # 任务5补充：聊天中切换人格 → 立即生效（下一句回复的提示词与音色同步切换）
+    def switch_personality(p):
+        UI_STATE["personality"] = p if p in ("踏实务实", "风趣幽默", "暖心知心") else "踏实务实"
+        return UI_STATE["personality"]
+    persona_switch.change(switch_personality, [persona_switch], [personality])
 
     # 文字/语音交互后刷新事件与提醒面板
     def refresh_panels(*args):

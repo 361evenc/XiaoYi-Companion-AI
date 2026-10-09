@@ -1,0 +1,128 @@
+修改时间：2026-10-08
+修改文件：app.py
+修改原因：
+  任务5：语音交互升级。
+  1) 原来全站只有一种音色（BV705 炀炀），三种人格听感无差异；
+  2) TTS 语速固定 0.8，不随情绪/场景变化（开心应轻快、关心应放慢、提醒应清晰有力）；
+  3) 语音播放器被 CSS 完全隐藏（audio-hidden），老人无法暂停/继续，也看不到播放进度。
+
+修改内容（均在 app.py）：
+
+【1. 人格 → 音色映射（L126-L133）】
+   新增常量 PERSONA_VOICE：
+     踏实务实 → BV002_streaming（通用男声，沉稳）
+     风趣幽默 → BV004_streaming（开朗青年，活泼男声）
+     暖心知心 → BV104_streaming（温柔淑女，柔和女声）
+   音色 ID 取自火山引擎官方音色列表；如需更换可到火山控制台试听后
+   直接改这三个值。若某音色返回鉴权错误（未开通该音色授权），
+   可退回 BV002/BV705 等基础音色。
+
+【2. 场景 → 节奏映射（L135-L142）】
+   新增常量 EMOTION_SPEED：愉悦→0.95（快一点）、平淡→0.8、低落→0.7（慢一点）
+   新增常量 REMINDER_TTS_PARAMS：speed 0.85 / pitch 1.05 / volume 1.5（提醒清晰有力）
+   新增常量 CARING_TTS_PARAMS：speed 0.7（主动关怀放慢放柔）
+
+【3. TTS 底层参数化（L558-L575、L593-L605）】
+   tts_request(text, voice_type=None, speed=0.8, pitch=1.0, volume=1.3)
+   text_to_speech(text, voice_type=None, speed=0.8, pitch=1.0, volume=1.3)
+   —— 原固定值（0.8/1.3/1.0）变为默认参数，旧调用点行为不变（向后兼容）
+
+【4. 情绪落点（L311、L882-L883）】
+   UI_STATE 增加 "last_emotion"（默认"平淡"）；
+   chat_response 中每轮情绪分析后写入 UI_STATE["last_emotion"]。
+
+【5. 播报函数接入（L1060-L1074）】
+   play_reply_audio：按 UI_STATE["personality"] 选音色、
+   按 UI_STATE["last_emotion"] 选语速 → text_to_speech(content, voice, speed)
+   play_mic_reply_audio 委托 play_reply_audio，自动继承（未改）
+
+【6. 主动关怀放慢（L1130-L1142）】
+   inject_proactive_message 的 TTS 改为
+   text_to_speech(msg, voice=人格音色, **CARING_TTS_PARAMS)  # speed 0.7
+
+【7. 提醒清晰有力（L1528-L1536）】
+   build_reminder_audio 的 TTS 改为
+   text_to_speech(text, voice=人格音色, **REMINDER_TTS_PARAMS)  # 0.85/1.05/1.5
+
+【8. 播放进度条 + 暂停/继续（CSS L1679-L1686、组件 L1857-L1860）】
+   - custom_css 新增 .audio-bar 小型语音条样式（暖色圆角卡片、40px 高、
+     隐藏下载按钮）；原 .audio-hidden 样式保留备用
+   - audio_output 组件从 Blocks 顶层（渲染在欢迎页上方）移到
+     main_view 聊天窗（chat）正下方，elem_classes 改 "audio-bar"，
+     autoplay=True 保留，buttons=[] 隐藏下载/分享按钮
+   - Gradio Audio 原生自带：播放/暂停切换按钮 + 可拖动进度条 + 时长显示，
+     自动播放后老人可随时点暂停/继续、拖进度条重听
+
+验证：
+   - python -m py_compile app.py 通过
+   - AST 断言：PERSONA_VOICE/EMOTION_SPEED/REMINDER_TTS_PARAMS/CARING_TTS_PARAMS
+     常量存在；tts_request/text_to_speech 均含 voice_type/speed/pitch/volume 参数；
+     PERSONA_VOICE.get(UI_STATE...) 接入点 >=3 处
+   - gradio 6.14.0 兼容性确认：Audio 无 show_download_button 参数（已移除），
+     改用 buttons=[]（源码 set_default_buttons(buttons, ["download","share"])）
+   - 手动验证：python app.py 后——
+     ① 分别选"踏实务实/风趣幽默/暖心知心"进入聊天，各说一句话，
+        听音色是否为男声/活泼男声/柔和女声
+     ② 说"我今天特别开心"→回复语速应明显变快（0.95）；
+        说"我有点难受"→语速放慢（0.7）
+     ③ 设一条 1 分钟后的提醒，到点播报应比平时响亮、语速稍快
+     ④ 聊天窗下方应出现语音条：可暂停/继续、可拖动进度条
+
+补充修改（2026-10-09）：修复"三种人格音色听起来没变"问题
+  原因：
+    进聊天时的欢迎语音（enter_chat L1888）和取消静音提示（toggle_mute
+    L1149）两处仍用默认音色 BV705 炀炀——用户进聊天先听到的是欢迎语，
+    三种人格听感完全相同，造成"音色没变"的观感。对话回复路径本身正常。
+  修复：
+    ① enter_chat 欢迎语音改为 PERSONA_VOICE 按当前人格选音色
+    ② toggle_mute "小忆语音已开启" 同样改用人格音色
+    ③ 新增顶栏人格切换器 persona_switch（Dropdown，位于 top-bar 与聊天窗
+       之间）：聊天中随时切换人格，提示词与音色同步生效，免刷新页面；
+       enter_chat 返回时同步切换器显示值
+  验证：
+    - 全部 6 处 text_to_speech 调用点均显式传 voice_type（脚本核查通过）
+    - 三人格同文本实测：BV002 时长3.71s / BV004 3.73s / BV104 3.98s，
+      md5 全不同 → API 层音色确实在变
+  注意：修改后需重启 python app.py 才能生效（旧进程仍运行旧代码）
+
+注意：
+   - BV002/BV004/BV104 需在火山 TTS 控制台对应音色已开通授权（同 BV705）；
+     若返回 code!=3000 提示音色无效，改 PERSONA_VOICE 换成已开通音色即可
+   - toggle_mute 的"小忆语音已开启"仍用默认音色/语速（引导语，无需个性化）
+
+二次调整（2026-10-09）：用户反馈换音色
+  原因：用户要求踏实务实换回原默认男声，另两个人格换更合适的
+  调整：
+    踏务实 → BV705 炀炀（原默认，自然对话风男声，语速保持默认 0.8）
+    风趣幽默 → BV123 阳光青年（活泼男声，有声阅读系列，起伏丰富适合幽默）
+    暖心知心 → BV007 亲切女声（智能助手系列，日常亲切，陪伴感更强）
+  候选音色已全部实测可用（BV705/BV123/BV007 code=3000）
+  py_compile 通过
+  注意：需重启 python app.py 才能生效
+
+三次调整（2026-10-09）：用户要求暖心知心换成温柔可爱女声
+  调整：
+    暖心知心 → BV405 甜美小源（甜美可爱女声，智能助手系列）
+    候选 BV405/BV113/BV104/BV001/BV428/BV064 全部实测可用
+    选 BV405：名字"甜美"+"小源"贴合温柔可爱定位，智能助手系列适合陪伴
+  隐藏取消静音弹出的播放器：
+    原因：toggle_mute 返回"小忆语音已开启"提示音到主 audio_output，
+          导致每次取消静音都弹出一个带波形/暂停按钮的可见播放器组件
+    修复：新增 audio_hint 隐藏 Audio 组件（visible=False + audio-hidden CSS），
+          mute_btn.click 输出从 audio_output 改为 audio_hint
+          → 提示音照常播放，但界面不再弹出可见播放器
+    影响范围：仅取消静音提示音路径；对话回复/提醒/主动关怀仍走主 audio_output
+  py_compile 通过
+  注意：需重启 python app.py 才能生效
+
+四次调整（2026-10-09）：用户要求所有语音输出都不显示播放器组件
+  原因：任务5原加了可见语音条（audio-bar），但用户实际体验后觉得
+        每次语音输出都弹出带波形/暂停按钮的播放器组件很烦，
+        要求所有语音（对话回复/提醒/主动关怀/取消静音）都只播放声音不显示组件
+  调整：
+    1. audio_output 从 elem_classes="audio-bar"（可见）改回 "audio-hidden"（隐藏）
+    2. 删除多余的 audio_hint 组件（不需要单独的提示音通道了，都走 audio_output）
+    3. mute_btn.click 输出从 audio_hint 改回 audio_output
+  效果：所有语音输出只播放声音，界面不显示任何播放器组件
+  py_compile 通过
+  注意：需重启 python app.py 才能生效

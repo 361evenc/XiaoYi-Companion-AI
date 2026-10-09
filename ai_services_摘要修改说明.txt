@@ -1,0 +1,21 @@
+修改时间：2026-10-08
+修改文件：ai_services.py
+修改原因：
+  实现"短期对话记忆 + 历史摘要压缩"功能（任务1）。
+  当对话超过 20 轮（40 条消息）时，把更早的对话原文压缩为摘要，避免上下文无限增长。
+  摘要由 DeepSeek 增量合并生成（旧摘要 + 新溢出片段 → 新摘要）。
+
+修改内容：
+  1. 新增常量 MAX_SUMMARY_LEN = 800（摘要最大字符数，防止膨胀）
+  2. 新增常量 _SUMMARY_SYSTEM（摘要员 system prompt，要求保留健康/用药/家人/情绪等关键信息，第三人称简洁中文）
+  3. 新增函数 summarize_conversation_segment(old_summary, new_segment, call_name="奶奶")
+     - 复用现有 _ask_llm（10s 超时、失败返回 ""）
+     - 失败返回 "" 由调用方降级保留原文
+     - 超过 MAX_SUMMARY_LEN 字符截断
+
+新增位置：文件末尾（L309-L338，紧邻 build_biography 之后，标记为"任务1：短期对话记忆摘要"）
+
+调用方：app.py 中的 _maybe_compress_history() 函数
+
+参考文档：
+  - .trae/documents/短期对话记忆与摘要压缩.md（实施方案）

@@ -306,3 +306,33 @@ def build_biography(bank, call_name="奶奶"):
     if not parts:
         return f"{call_name}，您跟我说的话还不多，等以后多聊聊，我给您写段小传～"
     return f"📖 {call_name}的小传：\n" + "\n".join(parts)
+
+
+# ---------------------------------------------------------------- 任务1：短期对话记忆摘要
+
+MAX_SUMMARY_LEN = 800
+
+_SUMMARY_SYSTEM = (
+    "你是小忆的对话摘要员。把「旧摘要 + 新对话片段」合并成一份新摘要。\n"
+    "必须保留：健康状况、用药、家人、情绪、关键事件、用户提到的人物/时间/地点。\n"
+    "必须删除：寒暄、重复、无信息量内容。\n"
+    "用第三人称、简洁中文，不超过 800 字。直接输出摘要正文，不要前缀标题。"
+)
+
+
+def summarize_conversation_segment(old_summary, new_segment, call_name="奶奶"):
+    """增量合并摘要。new_segment: [{"role","content"},...]
+    返回新摘要字符串；失败返回 ""（调用方据此保留原文不删除）"""
+    if not new_segment:
+        return old_summary or ""
+    seg_text = "\n".join(
+        f"{m['role']}：{m['content']}" for m in new_segment if m.get("content")
+    )
+    user_prompt = f"【旧摘要】\n{old_summary or '（无）'}\n\n【新对话片段】\n{seg_text}"
+    raw = _ask_llm(_SUMMARY_SYSTEM, user_prompt, max_tokens=600)
+    if not raw:
+        return ""
+    out = raw.strip()
+    if len(out) > MAX_SUMMARY_LEN:
+        out = out[:MAX_SUMMARY_LEN]
+    return out

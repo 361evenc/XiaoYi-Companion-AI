@@ -1,0 +1,83 @@
+修改时间：2026-10-08
+修改文件：app.py
+修改原因：
+  实现"短期对话记忆 + 历史摘要压缩"功能（任务1）。
+  原代码每次只把最近 4 轮对话送给 DeepSeek/本地 3B 模型，长谈场景下小忆会"忘事"。
+  现保留最近 20 轮（40 条消息）原文，更早的对话压缩为摘要，
+  每次请求模型时拼装为 [system, 摘要system, 最近40条, 当前用户输入]。
+
+修改内容：
+
+【1】常量区段（L297-L299）
+   新增 RECENT_TURNS = 20            # 保留原文轮数
+   新增 RECENT_MSGS = RECENT_TURNS * 2  # 40 条消息
+
+【2】load_all_conversations()（L301-L308）
+   在 sort 前用 setdefault 补齐 3 个新字段：summary / summary_until_index / last_summarized_ts
+   旧 conversations.json 数据迁移：缺字段视为"未摘要"，下次溢出时自然触发首轮摘要
+
+【3】save_conversation()（L310-L347）
+   签名扩展为 save_conversation(conv_id, messages, title=None, update_title=False, summary=None)
+   summary is not None 时写入 conv 的 summary / summary_until_index / last_summarized_ts 字段
+   其余出口（忘记意图/提醒/记忆确认/冷场/正常聊天后）默认不传 summary，不覆盖压缩结果
+
+【4】新增 _maybe_compress_history(conv_id, internal_history, call_name)（L349-L369）
+   - len <= RECENT_MSGS 时直接返回原值
+   - 否则取出 overflow = internal_history[:-RECENT_MSGS]
+   - 调 ai_services.summarize_conversation_segment(old_summary, overflow, call_name)
+   - 失败返回 (原 internal_history, "")，不修改 conv（降级保留原文）
+   - 成功后立即 save_conversation 写回裁剪后的 messages + new_summary，避免后续 save 回滚
+
+【5】chat_response() 中插入调用（L882-L884）
+   位置：构造完 internal_history 之后、忘记/提醒/记忆确认/冷场等所有分支之前
+   internal_history, history_summary = _maybe_compress_history(conv_id, internal_history, call_name)
+   所有出口共享同一份压缩后历史
+
+【6】DeepSeek 拼装改动（L941-L954）
+   原：msgs = [system] + internal_history[-4:] + [user]
+   新：msgs = [system] + (有摘要时插入"【之前对话摘要】"system条目) + internal_history[-RECENT_MSGS:] + [user]
+
+【7】本地 3B 模型路径拼装改动（L956-L964）
+   原：取 internal_history[-4:]，system_content + search_context
+   新：取 internal_history[-RECENT_MSGS:]，system 末尾追加摘要段（如有）
+   40 条对 3B 上下文可能偏紧，OOM 由现有异常分支兜底
+
+边界与并发：
+   - 时序：摘要-裁剪-save 三步在 _maybe_compress_history 内原子完成，先于后续任何 save 调用
+   - 延迟：同步阻塞，但仅溢出那一轮触发（约每 20 轮一次），10s 超时
+   - 降级：DeepSeek 失败返回 "" -> 不裁剪、summary 仍为空、下轮再试
+   - 并发：_ask_llm 走 DeepSeek API 不占 MODEL_LOCK；save_conversation 已有串行化
+
+参考文档：
+   - .trae/documents/短期对话记忆与摘要压缩.md（完整实施方案）
+   - ai_services_摘要修改说明.txt（配套修改）
+
+================ 2026-10-08 修复记录 ================
+
+修复原因：
+  实际跑 25 轮对话后发现两个 Bug：
+  A) messages 长度稳定在 42 而非 40：触发裁剪后保存 40 条，
+     紧接着 save_history = trimmed + [user, assistant] 又写回 42 条，
+     下一轮又触发，循环稳定在 42。
+  B) summary_until_index 永远 = 0：原逻辑 len(messages) > RECENT_MSGS
+     当 trimmed=40 时为 False，落到 else 保留原值 0。
+  副作用：每轮都触发摘要，DeepSeek API 成本翻倍。
+
+修复内容：
+
+【A 修复】_maybe_compress_history 触发阈值（L358）
+   原：if len(internal_history) <= RECENT_MSGS: return ...
+   新：if len(internal_history) <= RECENT_MSGS + 2: return ...
+   留出当前轮 user+assistant 写入空间，避免每轮重复触发。
+
+【B 修复】save_conversation 扩展 summary_until_index 参数（L310-L311）
+   签名加 summary_until_index=None；显式传入时直接采用；
+   未传但 messages 超阈值时按 len-RECENT_MSGS 估算；
+   否则保留原值防回退。
+   _maybe_compress_history 内显式计算 new_sui = old_sui + len(overflow)，
+   精确反映"messages 中已被摘要覆盖的下一条索引"。
+
+预期修复后行为：
+   - messages 长度稳定在 40 条（偶尔 41-42，下一轮触发后收敛）
+   - summary_until_index 累积递增，反映已摘要覆盖的索引
+   - 摘要触发频率从"每轮"降到"每 2-3 轮"，API 成本减半

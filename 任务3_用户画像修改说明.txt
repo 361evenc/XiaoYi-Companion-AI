@@ -1,0 +1,53 @@
+修改时间：2026-10-08
+修改文件：memory_system.py、app.py
+修改原因：
+  任务3：用户画像改成表格文件。
+  画像原来以折叠卡片形式展示在侧边栏「记忆与画像」面板，占界面空间且
+  老人无需直接查看这类结构化数据。改为隐藏在后台：画像持续写进
+  项目根目录的 用户画像.txt，越用越全，界面不再展示。
+
+修改内容：
+
+【memory_system.py】
+
+1. panel_html()（原 L937-L1006）
+   - 撤掉第 1 段"画像"折叠卡片（FIELD_INFO 配色的 field 分组卡片）
+   - 保留"小忆的理解"（反思）与"最近记下的"（记忆时间线）两段
+   - 两段皆空时显示占位提示"多陪老人聊聊，小忆就会记住 TA 的事"
+   - 段落编号 1) 反思 / 2) 记忆时间线
+   - docstring 改为「侧边栏「记忆」面板」
+
+2. 新增 export_profile_txt(path, name="")（L984-L1007）
+   - 把 profile_snapshot() 画像快照写进 txt 文件
+   - 格式：每行一项"字段：值"，同字段多项用、分隔；首行"姓名：X"（由调用方传称呼）
+   - 原子写入（tmp + os.replace），失败只打日志不影响主流程
+   - 每字段最多取 6 条（与原卡片展示上限一致）
+
+【app.py】
+
+3. 常量区（L781）
+   新增 PROFILE_TXT_FILE = "用户画像.txt"
+
+4. _memory_worker()（L810-L823）
+   每轮后台记忆抽取 observe() 之后调用
+   memory_bank.export_profile_txt(PROFILE_TXT_FILE, user_memory["call_name"])
+   ——画像文件随对话"越用越全"，静默更新
+
+5. 侧边栏 UI（L1803-L1804）
+   标题 "🧠 记忆与画像" → "🧠 记忆"（画像已移出界面）
+
+导出文件示例（用户画像.txt）：
+   姓名：张奶奶
+   家庭：孙子：孙子豆豆上初二
+   健康：血压：有高血压
+   兴趣：听戏：喜欢听越剧
+
+验证：
+   - python -m py_compile 两文件均通过
+   - 离线构造记忆库测试：export_profile_txt 输出格式正确
+   - panel_html 不再包含画像卡片结构（mp0/b_algo 断言通过）
+   - 手动验证：python app.py 聊几轮后查看根目录 用户画像.txt 是否逐轮变全
+
+注意：
+   - FIELD_INFO/CONFIRM_CONF 常量保留（eval_memory.py 等评测脚本可能引用）
+   - 画像 txt 为 UTF-8 编码，换行符 \n

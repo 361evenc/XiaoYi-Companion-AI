@@ -935,43 +935,14 @@ class MemoryBank:
             }
 
     def panel_html(self, now=None):
-        """侧边栏「记忆与画像」面板（保持旧面板暖色折叠风格）"""
+        """侧边栏「记忆」面板（画像卡片已撤掉，改为后台导出 用户画像.txt，任务3）"""
         now = now or self.clock()
-        snap = self.profile_snapshot(now)
         refls = sorted(self.reflections, key=lambda r: -r.get("ts", 0))[:3]
         eps = self.timeline(8, now)
         st = self.stats(now)
 
         html_parts = []
-        # 1) 画像
-        if snap:
-            for idx, (field, items) in enumerate(snap.items()):
-                icon, bg, border = FIELD_INFO.get(field, FIELD_INFO["其他"])
-                entries = "".join(
-                    f"<div style='padding:3px 0;font-size:15px;'>"
-                    + (it['value'] if it['key'] == it['value']
-                       else f"{it['key']}：{it['value']}")
-                    + ("<span style='color:#E65100;font-size:12px;'>（待确认）</span>"
-                       if it["confidence"] < CONFIRM_CONF else "")
-                    + f"<span style='color:#aaa;font-size:12px;margin-left:6px;'>"
-                      f"{humanize_ago(it['ts'], now)}</span></div>"
-                    for it in items[:6])
-                cid = f"mp{idx}"
-                html_parts.append(f"""
-        <div style='background:{bg};border:1px solid {border};border-radius:10px;margin-bottom:8px;overflow:hidden;'>
-            <input type="checkbox" id="{cid}" checked style="display:none;">
-            <label for="{cid}" style="display:flex;align-items:center;justify-content:space-between;padding:7px 10px;cursor:pointer;font-size:15px;font-weight:bold;user-select:none;">
-                <span>{icon} {field} <span style="font-size:12px;color:#999;">{len(items)}条</span></span>
-                <span style="font-size:12px;color:#999;">▼</span>
-            </label>
-            <div style="padding:0 10px 8px;">{entries}</div>
-        </div>""")
-        else:
-            html_parts.append(
-                "<div style='color:#8B5E34;padding:8px;text-align:center;'>"
-                "多陪老人聊聊，小忆就会记住 TA 的事</div>")
-
-        # 2) 反思
+        # 1) 反思
         if refls:
             entries = "".join(
                 f"<div style='padding:3px 0;font-size:14px;color:#5D4037;'>"
@@ -984,7 +955,7 @@ class MemoryBank:
                 f"<div style='font-size:15px;font-weight:bold;margin-bottom:4px;'>💡 小忆的理解</div>"
                 f"{entries}</div>")
 
-        # 3) 记忆时间线
+        # 2) 记忆时间线
         if eps:
             entries = "".join(
                 f"<div style='padding:4px 0 4px 16px;font-size:15px;position:relative;"
@@ -1001,9 +972,39 @@ class MemoryBank:
                 f"<div style='font-size:15px;font-weight:bold;margin-bottom:4px;'>🕘 最近记下的</div>"
                 f"{entries}</div>")
 
+        if not html_parts:
+            html_parts.append(
+                "<div style='color:#8B5E34;padding:8px;text-align:center;'>"
+                "多陪老人聊聊，小忆就会记住 TA 的事</div>")
+
         stats_line = (f"<div style='margin-top:8px;font-size:13px;color:#8B5E34;text-align:center;'>"
                       f"记住{st['facts']}件事 · 被想起{st['recalls']}次 · 沉淀{st['reflections']}条理解</div>")
         return "".join(html_parts) + stats_line
+
+    # ---- 任务3：画像导出到 用户画像.txt（后台静默更新，不占界面） ----
+    def export_profile_txt(self, path, name=""):
+        """把当前画像快照写进 txt 文件，格式：字段：值（每行一项，同字段多项用、分隔）。
+        越用越全：记忆库每次更新后由调用方触发重写。失败只打日志不影响主流程。"""
+        try:
+            snap = self.profile_snapshot()
+            lines = []
+            if name:
+                lines.append(f"姓名：{name}")
+            for field, items in snap.items():
+                vals = []
+                for it in items[:6]:
+                    v = (it["value"] if it["key"] == it["value"]
+                         else f"{it['key']}：{it['value']}")
+                    vals.append(v)
+                if vals:
+                    lines.append(f"{field}：{'、'.join(vals)}")
+            content = "\n".join(lines) + ("\n" if lines else "")
+            tmp = f"{path}.{os.getpid()}_{threading.get_ident()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(content)
+            os.replace(tmp, path)
+        except Exception as e:
+            print(f"画像导出失败: {e}")
 
     # ---- 旧数据迁移 ----
     def import_legacy_events(self, path, max_age_days=7):
