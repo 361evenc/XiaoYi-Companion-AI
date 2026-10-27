@@ -203,6 +203,23 @@ def build_cross_session_greeting(bank, call_name="奶奶", now=None):
     return f"{call_name}，您来啦。" + "，".join(parts) + "？"
 
 
+def vision_recognize(image_path):
+    """视觉识别钩子（占位）：接收照片/图片文件路径，返回一句给老人的自然语言结果。
+    由 AI工程师④ 接入视觉模型后填充；当前恒返回 None —— 前端只弹"收到照片啦，我看看…"。
+    """
+    # TODO(AI工程师④)：在此接入视觉识别（OCR / 物体 / 场景描述），返回自然语言。
+    return None
+
+
+def recall_message(conv_id, removed_user_msg):
+    """消息撤回钩子（占位）：前端「撤回」按钮删掉最后一条用户消息后调用。
+    由 AI工程师⑥ 接入后端彻底清除（对话文件 / 短期记忆 / 提取到的记忆 / 用户画像）后填充；
+    当前仅打通前端链路，返回 None。removed_user_msg 为被撤回的消息 dict({"role","content"})。
+    """
+    # TODO(AI工程师⑥)：在此彻底清除该条消息及其引发的记忆/画像/意图痕迹，让小忆"不记得、不再提"。
+    return None
+
+
 # ---------------------------------------------------------------- 任务7：忘了吧（真删记忆）
 
 # 遗忘意图：注意"忘不掉/忘不了"不含"忘掉吧/忘了吧"，不误伤

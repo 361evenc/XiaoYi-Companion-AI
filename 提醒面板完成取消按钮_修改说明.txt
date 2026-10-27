@@ -1,0 +1,42 @@
+提醒面板「完成 / 取消」按钮 修改说明
+====================================
+
+修改原因
+--------
+1. 之前提醒面板（get_reminders_panel_html）只展示「未到点的待办」且没有任何按钮，
+   老人只能靠「说对话」来取消/确认，而老人往往不会说对应的话。
+2. 已到点、正在被反复补催的提醒（status=fired，awaiting_confirm）根本没进面板，
+   导致「完成了还被反复催」却无处可点。
+
+修改内容（仅 app.py 一处，未改 reminder.py 后端逻辑）
+--------------------------------------------------
+1. 新增隐藏回传通道：
+   - 常量 REMINDER_ACTION_EL_ID = "reminder-action-input"
+   - 隐藏文本框 gr.Textbox(visible=True, elem_id=..., elem_classes="reminder-action-hidden")
+     用 CSS 隐藏（.reminder-action-hidden { display:none !important; }），保持 DOM 可写。
+
+2. 新增两个辅助函数：
+   - _reminder_action_js(verb, rid)：生成按钮 onclick 的 JS，把 "verb|rid" 写入隐藏文本框
+     并派发 input 事件，从而触发 Gradio 的 .change()。
+   - _reminder_button(verb, rid, label, bg)：生成 ≥48px 的大按钮（老人易点），
+     完成=绿、取消=红。
+
+3. 重写 get_reminders_panel_html()，按提醒状态各显其一（采纳「按状态各显其一」方案）：
+   - 已到点在催（awaiting_confirm）→ 显示「✅ 完成」按钮，点后走 reminder_store.confirm，
+     与语音「喝了/办好了」同一条意图闭环；确认后条目消失，当天不再催。
+   - 未到点待办（pending）→ 显示「✖ 取消」按钮，点后走 reminder_store.cancel，
+     与语音「取消提醒」同一条意图闭环；条目消失。
+   - 用 awaiting_ids 去重，避免周期提醒（既在 awaiting 又在 pending）显示两次。
+
+4. 新增 handle_reminder_action(action)：
+   - 解析 "done|rid" / "cancel|rid"，调用同一条后端方法
+     confirm / cancel（未新增任何后端逻辑），再返回刷新后的面板 HTML。
+
+5. 事件绑定：
+   reminder_action_input.change(handle_reminder_action, [reminder_action_input], [reminders_display])
+   点按钮 → 写隐藏框 → change → 后端 confirm/cancel → 面板立即刷新、条目消失。
+
+效果
+----
+- 老人不用「会说话」也能管理提醒：点一下就完成/取消。
+- 点到点的提醒点「完成」当天不再催；点「取消」撤回不再提醒。

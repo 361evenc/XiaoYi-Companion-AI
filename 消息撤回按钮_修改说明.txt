@@ -1,0 +1,46 @@
+消息撤回按钮功能（P1 / 反馈2）修改说明
+========================================
+
+需求
+----
+说错话或识别错的最后一条消息要能撤回。老人不会悬停，按钮要常显、足够大。
+
+改动
+----
+1. UI（app.py）
+   - 在底部图标栏下方新增「↩️ 撤回上一条」按钮（recall_btn，.recall-btn）。
+   - 样式 .recall-btn button 强制 min-height:48px、字号18px、加粗、常显（不靠悬停）。
+
+2. 后端（app.py on_recall）
+   - 从聊天记录里从后往前找最后一条 user 消息，删除它；
+     若其后紧跟一条 assistant 回复（role==assistant）则一并删除（仅删 assistant，
+     避免误删下一条用户消息）。
+   - 删除后调 ai_services.recall_message(conv_id, removed)（AI工程师⑥ 钩子，占位）。
+   - 有 conv_id 时写回 conversations.json（save_conversation）。
+   - recall_btn.click(on_recall, [chat, current_conv_id], [chat])，页面即时消失。
+
+3. 钩子（ai_services.recall_message）
+   - 新增占位钩子：接收 conv_id 与被撤回的消息 dict，当前返 None，
+     TODO(AI工程师⑥)：在此彻底清除该消息引发的记忆/画像/意图痕迹，
+     让小忆"不记得、不再提"。
+
+说明
+----
+- 本期只做"最后一条"（控制范围，符合需求）。
+- 因 Gradio 的 gr.Chatbot 无法在单个气泡内嵌按钮，撤回入口放在输入区下方常显按钮，
+  实现与"气泡上按钮"等效的粒度（都是删最后一条用户发言及小忆回复）。
+- 若需要更强的"气泡上撤回"，需改渲染层（结构级），暂不纳入本期。
+
+追加修改（改成：按钮直接加在最后一条用户消息下面）
+---------------------------------------------
+- 需求：撤回按钮不要再放工具栏，直接出现在最后一条用户消息的下面。
+- 做法（app.py）：
+  1) 撤回触发器 recall_btn 改为隐藏但保留在 DOM（gr.Row elem_classes=photo-channel-hidden，
+     elem_id="xy-recall-trigger"），仍走 recall_btn.click(on_recall,...) 同一条后端。
+  2) 新增 RECALL_INJECT_JS：轮询+DOMContentLoaded 时，找到最后一条"用户消息气泡"
+     （.message.user 等选择器），在其末尾 append 一个「↩️ 撤回」按钮；
+     点击它再 programmatic-clik 隐藏的 xy-recall-trigger，触发 on_recall。
+  3) demo.launch 用 js=RECALL_INJECT_JS 注入脚本（已确认该 Gradio launch 支持 js）。
+  4) 新增 .xy-recall-injected 按钮样式（≥48px 常显）；删除工具栏的撤回按钮。
+- 说明：Gradio 会话气泡不能内嵌 Gradio Button，只能 DOM 注入 + 程序化点击触发。
+  注入按钮的选择器（.message.user）依赖 Gradio 实际渲染结构，可在浏览器验证后微调。
