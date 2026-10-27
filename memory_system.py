@@ -728,18 +728,23 @@ class MemoryBank:
     # ---- 检索（三因子）----
     REL_SIM_SCALE = 0.10   # 轻量相似度→[0,1] 的饱和尺度：明显相关≈0.10+，对齐 embedding 余弦量纲
 
+    @staticmethod
+    def _mem_text(mem):
+        """记忆的检索文本：情节/反思用原文；事实用键+值+首条原话（老人自己的措辞是最好的检索线索）"""
+        if "text" in mem:
+            return mem["text"]
+        text = f"{mem.get('key', '')}{mem.get('value', '')}"
+        quotes = mem.get("quotes") or []
+        if quotes:
+            text += quotes[0]
+        return text
+
     def _score(self, mem, query, now):
         last = mem.get("last_recall", mem.get("ts", now))
         hours = max(0.0, (now - last) / 3600.0)
         recency = 0.995 ** hours
         imp = mem.get("importance", 3) / 10.0
-        if "text" in mem:      # 情节/反思
-            text = mem["text"]
-        else:                  # 事实：键+值+首条原话——老人自己的措辞是最好的检索线索
-            text = f"{mem.get('key', '')}{mem.get('value', '')}"
-            quotes = mem.get("quotes") or []
-            if quotes:
-                text += quotes[0]
+        text = self._mem_text(mem)
         relevance = min(1.0, similarity(query, text) / self.REL_SIM_SCALE)
         w = self.weights
         return w[0] * recency + w[1] * imp + w[2] * relevance
@@ -768,16 +773,34 @@ class MemoryBank:
             return top
 
     def build_chat_context(self, query, k_facts=4, k_episodes=2, now=None):
-        """检索相关记忆并格式化为对话上下文块；同时完成回忆强化。无记忆返回空串"""
+        """检索相关记忆并格式化为对话上下文块；同时完成回忆强化。无记忆返回空串。
+        相关性闸门（2026-10-21）：只注入与当前话语有字面交集的记忆——小模型面对
+        一堆不相关记忆会逐条念成问句（长对话混乱的根因）；无相关记忆时最多补 1 条
+        imp≥7 核心画像（疾病/家人类）作锚点，保留"被记住"体验。未被注入的记忆不再
+        被强化，按遗忘曲线自然淡出——每轮对话都在"清理"不相关的记忆。"""
         now = now or self.clock()
         with self._lock:
-            facts = [f for f in self.facts if retrievability(f, now) >= FORGET_THRESHOLD]
-            facts = sorted(facts, key=lambda f: -self._score(f, query, now))[:k_facts]
+            live_facts = [f for f in self.facts if retrievability(f, now) >= FORGET_THRESHOLD]
+            rel_facts = sorted((f for f in live_facts
+                                if similarity(query, self._mem_text(f)) > 0),
+                               key=lambda f: -self._score(f, query, now))
+            rel_ids = {id(f) for f in rel_facts}
+            anchor = None
+            if len(rel_facts) < k_facts:
+                cands = [f for f in live_facts
+                         if id(f) not in rel_ids and f.get("importance", 0) >= 7]
+                if cands:
+                    anchor = max(cands, key=lambda f: self._score(f, query, now))
+            facts = rel_facts[:k_facts] + ([anchor] if anchor else [])
             used_keys = {f["key"] for f in facts}
-            eps = [e for e in self.episodes if retrievability(e, now) >= FORGET_THRESHOLD]
+            eps = [e for e in self.episodes
+                   if retrievability(e, now) >= FORGET_THRESHOLD
+                   and similarity(query, e["text"]) > 0]
             eps = [e for e in sorted(eps, key=lambda e: -self._score(e, query, now))
                    if not any(k and k in e["text"] for k in used_keys)][:k_episodes]
-            refl = [r for r in self.reflections if retrievability(r, now) >= FORGET_THRESHOLD]
+            refl = [r for r in self.reflections
+                    if retrievability(r, now) >= FORGET_THRESHOLD
+                    and similarity(query, r["text"]) > 0]
             refl = sorted(refl, key=lambda r: -self._score(r, query, now))[:1]
             recalled = facts + eps + refl
             for m in recalled:
@@ -937,6 +960,14 @@ class MemoryBank:
     def panel_html(self, now=None):
         """侧边栏「记忆」面板（画像卡片已撤掉，改为后台导出 用户画像.txt，任务3）"""
         now = now or self.clock()
+        # 待确认的事实（低置信度，等老人确认）→ 时间线上对应条目标"待确认"
+        with self._lock:
+            pending_ids = {c["fact_id"] for c in self.pending_confirms}
+            pending_marks = set()
+            for f in self.facts:
+                if f["id"] in pending_ids:
+                    pending_marks.add(f"{f['key']}{f['value']}")
+                    pending_marks.add(f"{f['key']}是{f['value']}")
         refls = sorted(self.reflections, key=lambda r: -r.get("ts", 0))[:3]
         eps = self.timeline(8, now)
         st = self.stats(now)
@@ -963,6 +994,7 @@ class MemoryBank:
                 f"<span style='position:absolute;left:-5px;top:9px;width:8px;height:8px;"
                 f"border-radius:50%;background:#C88A52;'></span>"
                 f"{'⭐' if e.get('importance', 3) >= 7 else ''} {e['text']}"
+                f"{' ⏳待确认' if any(m in e['text'] for m in pending_marks) else ''}"
                 f"<span style='color:#aaa;font-size:12px;margin-left:4px;'>"
                 f"{humanize_ago(e['ts'], now)}</span></div>"
                 for e in reversed(eps))

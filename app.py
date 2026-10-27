@@ -315,7 +315,10 @@ reminder_queue = deque(maxlen=20)
 
 # ========== 对话历史管理 ==========
 RECENT_TURNS = 20                 # 保留原文轮数
-RECENT_MSGS = RECENT_TURNS * 2     # 40 条消息（user+assistant 各一）
+RECENT_MSGS = RECENT_TURNS * 2     # 40 条消息（user+assistant 各一），DeepSeek/存储裁剪用
+# 上下文预算（2026-10-21：3B 小模型上下文一长就"念记忆"串词——长对话实测回答混乱）
+LONG_HIST_TURNS = 12              # 历史超过 12 轮 → 转 DeepSeek（大模型扛长上下文）
+LOCAL_RECENT_MSGS = 10 * 2        # 本地 3B 路径的历史窗口（10 轮）
 
 def load_all_conversations():
     convs = load_json_safe(HISTORY_FILE, [])
@@ -778,6 +781,175 @@ def search_and_summarize(query, top_k=4):
     print(f"🔍 已联网搜索: {query}（{len(results)} 条结果）")
     return "\n".join(lines)
 
+# ========== 天气数据源（Open-Meteo 免费接口，无需 key）==========
+# 信号5「外面变了」：降温/雨/雪 × 慢病关怀。后台线程每小时刷新一次并缓存，
+# get_weather_change 只读缓存——绝不阻塞 30s 主动关怀轮询；接口失败静默降级（信号不生效）。
+WEATHER_CITY = _load_secret("WEATHER_CITY")   # 可选：城市名（如"北京"）；留空则按公网 IP 自动定位
+
+_weather_cache = {"ts": 0.0, "data": None, "city": ""}
+
+def _detect_city():
+    """公网 IP → 城市名（ip-api.com 免费接口）；失败返回空串"""
+    try:
+        r = http_session.get("http://ip-api.com/json/?language=zh-CN", timeout=5)
+        d = r.json()
+        if d.get("status") == "success":
+            return (d.get("city") or "").strip()
+    except Exception as e:
+        print(f"城市自动定位失败: {e}")
+    return ""
+
+def _open_meteo_geocode(city):
+    """城市名 → (lat, lon)；失败返回 None"""
+    try:
+        r = http_session.get("https://geocoding-api.open-meteo.com/v1/search",
+                             params={"name": city, "count": 1, "language": "zh", "format": "json"},
+                             timeout=8)
+        results = (r.json() or {}).get("results") or []
+        if results:
+            return results[0]["latitude"], results[0]["longitude"]
+    except Exception:
+        pass
+    return None
+
+_WEATHER_CODES_SNOW = {71, 73, 75, 77, 85, 86}   # Open-Meteo 天气代码：雪/阵雪
+
+def _weather_refresh_loop():
+    """后台线程：每小时拉一次天气，检测 降温≥5℃ / 降雨 / 降雪"""
+    while True:
+        try:
+            city = WEATHER_CITY or _detect_city()
+            data = None
+            if city:
+                loc = _open_meteo_geocode(city)
+                if loc:
+                    r = http_session.get("https://api.open-meteo.com/v1/forecast",
+                                         params={"latitude": loc[0], "longitude": loc[1],
+                                                 "past_days": 1, "forecast_days": 1,
+                                                 "daily": "temperature_2m_min,precipitation_sum,weathercode",
+                                                 "timezone": "Asia/Shanghai"},
+                                         timeout=10)
+                    d = (r.json() or {}).get("daily") or {}
+                    if d.get("time") and len(d["time"]) >= 2:
+                        # past_days=1：索引0=昨天，索引1=今天
+                        tmin_y, tmin_t = d["temperature_2m_min"][0], d["temperature_2m_min"][1]
+                        rain = (d["precipitation_sum"][1] or 0) >= 1.0
+                        snow = d["weathercode"][1] in _WEATHER_CODES_SNOW
+                        drop = (tmin_y - tmin_t) if (tmin_y is not None and tmin_t is not None) else 0
+                        if snow:
+                            data = {"kind": "snow", "desc": f"{city}今天可能要下雪，出门注意路滑"}
+                        elif rain:
+                            data = {"kind": "rain", "desc": f"{city}今天可能要下雨，出门记得带伞"}
+                        elif drop >= 5:
+                            data = {"kind": "cold",
+                                    "desc": f"{city}今儿降温约{int(drop)}度，最低{int(tmin_t)}度"}
+            _weather_cache.update({"ts": time.time(), "data": data, "city": city})
+            if data:
+                print(f"🌦️ 天气信号: {data['desc']}")
+        except Exception as e:
+            print(f"天气刷新失败: {e}")
+        time.sleep(3600)
+
+def get_weather_change():
+    """proactive 的 weather_provider：缓存 3 小时内有效；无数据返回 None，永不阻塞"""
+    c = _weather_cache
+    if c["data"] and time.time() - c["ts"] < 3 * 3600:
+        return c["data"]
+    return None
+
+Thread(target=_weather_refresh_loop, daemon=True, name="weather").start()
+
+# ========== 专项榜单数据源（实时热榜：抖音/微博/百度/快手/头条）==========
+# 问题反馈3.0 第5条："今天抖音热点top前10"通用搜索答不了——
+# 热榜类问题优先走榜单接口（结构化、实时），多源备胎，全部失败才回退通用网页搜索。
+HOTLIST_SOURCES = {
+    # 60s.viki.moe 本机实测可达、最稳，放首位；vvhan/tenapi 作备胎（实测时有不可达）
+    "douyin":   ["https://60s.viki.moe/v2/douyin",
+                 "https://api.vvhan.com/api/hotlist/douyinHot",
+                 "https://tenapi.cn/v2/douyinhot"],
+    "weibo":    ["https://60s.viki.moe/v2/weibo", "https://api.vvhan.com/api/hotlist/wbHot"],
+    "baidu":    ["https://60s.viki.moe/v2/baidu/hot", "https://api.vvhan.com/api/hotlist/baiduRD"],
+    "kuaishou": ["https://60s.viki.moe/v2/kuaishou"],
+    "toutiao":  ["https://60s.viki.moe/v2/toutiao/hot"],
+}
+PLATFORM_NAMES = {"douyin": "抖音", "weibo": "微博", "baidu": "百度",
+                  "kuaishou": "快手", "toutiao": "头条"}
+HOTLIST_KW_RE = re.compile(r"热搜|热榜|热点|排行榜|榜单|榜|[tT][oO][pP]")
+
+def detect_hotlist(text):
+    """热榜类问题（如"今天抖音热搜前十"）→ 平台 key；否则 None。未指明平台默认抖音。"""
+    t = str(text)
+    if not HOTLIST_KW_RE.search(t):
+        return None
+    for name, key in [("抖音", "douyin"), ("微博", "weibo"), ("百度", "baidu"),
+                      ("快手", "kuaishou"), ("头条", "toutiao")]:
+        if name in t:
+            return key
+    return "douyin"
+
+def fetch_hotlist(platform, top_n=10):
+    """拉实时榜单，返回 [(排名, 标题)]；多源备胎依次尝试，全失败返回空列表"""
+    for url in HOTLIST_SOURCES.get(platform, []):
+        try:
+            r = http_session.get(url, timeout=6)
+            items = (r.json() or {}).get("data") or []
+            out = []
+            for i, it in enumerate(items[:top_n], 1):
+                title = ((it.get("title") or it.get("name") or "").strip()
+                         if isinstance(it, dict) else str(it).strip())
+                if title:
+                    out.append((i, title))
+            if out:
+                print(f"🔥 榜单拉取 {platform}: {len(out)} 条（{url.split('/')[2]}）")
+                return out
+        except Exception:
+            continue
+    return []
+
+def hotlist_context(text, top_n=10):
+    """热榜问题 → 榜单参考资料文本；拉取失败返回空串（调用方回退通用搜索）"""
+    platform = detect_hotlist(text)
+    if not platform:
+        return ""
+    items = fetch_hotlist(platform, top_n)
+    if not items:
+        return ""
+    name = PLATFORM_NAMES.get(platform, "抖音")
+    lines = "\n".join(f"{i}. {t}" for i, t in items)
+    return (f"[{name}实时热榜（最新数据，共{len(items)}条）]\n{lines}\n"
+            "回答要求：把上面榜单按顺序念给老人（第几名+标题），先说第1名是什么，"
+            "结尾问一句哪个 TA 感兴趣；不许说查不到。")
+
+# ========== 图像识别（可插拔：OpenAI 兼容 vision 接口）==========
+# 任务8：拍照/上传图片 → 识别结果注入对话上下文；未配置 key 时如实说"暂时认不出"。
+VISION_API_BASE = _load_secret("VISION_API_BASE")   # OpenAI 兼容格式，如 https://api.xxx.com/v1
+VISION_API_KEY = _load_secret("VISION_API_KEY")
+VISION_MODEL = _load_secret("VISION_MODEL") or "qwen-vl-max"
+
+def recognize_image(path):
+    """识别图片内容，返回一句话描述；未配置/失败返回空串（不阻塞主流程）"""
+    if not (VISION_API_KEY and VISION_API_BASE):
+        return ""
+    try:
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode()
+        mime = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+        r = http_session.post(f"{VISION_API_BASE.rstrip('/')}/chat/completions",
+                              headers={"Authorization": f"Bearer {VISION_API_KEY}",
+                                       "Content-Type": "application/json"},
+                              json={"model": VISION_MODEL, "max_tokens": 120,
+                                    "messages": [{"role": "user", "content": [
+                                        {"type": "text",
+                                         "text": "用一句中文（30字内）描述这张照片的主要内容。是人的话只说在做什么，不确定的人名不要写。"},
+                                        {"type": "image_url",
+                                         "image_url": {"url": f"data:{mime};base64,{b64}"}}]}]},
+                              timeout=20)
+        d = r.json() or {}
+        return ((d.get("choices") or [{}])[0].get("message", {}).get("content") or "").strip()
+    except Exception as e:
+        print(f"图像识别失败: {e}")
+        return ""
+
 def deepseek_chat_msgs(messages, max_tokens=300, timeout=60):
     """调用 DeepSeek 对话接口，返回回复文本（失败返回空串）；主 key 失败自动换备用 key"""
     last_err = ""
@@ -899,11 +1071,8 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
                       f"（例如：{call_name}，您今天气色真好），"
                       f"绝对不能把TA叫成「{wrong_call}」。")
 
-    # 记忆检索：三因子（新近性×重要性×相关性）取相关记忆注入上下文——
-    # "上次您说膝盖疼，这几天好点没？"的"被记住"体验由此而来
-    mem_ctx = memory_bank.build_chat_context(user_input)
-    if mem_ctx:
-        system_content += f"\n{mem_ctx}"
+    # 记忆检索（三因子：新近性×重要性×相关性）移到下方"模型通道决定"之后按通道注入：
+    # DeepSeek 用全量（4 事实+2 经历+1 反思），本地 3B 减半（2+1）——小模型记太多会念出来
 
     # 统一 chat_history 为纯文本 dict（extract_text 为模块级函数）
     internal_history = []
@@ -965,9 +1134,13 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         save_conversation(conv_id, save_history)
         return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
-    # 联网搜索：时效性/事实性问题先搜 Bing，再让 DeepSeek 结合资料回答
+    # 联网搜索：热榜类问题先走专项榜单数据源（抖音热榜等，实时结构化，反馈3.0第5条）；
+    # 其余时效性/事实性问题走 Bing 搜索，再让模型结合资料回答
     search_context = ""
-    if needs_search(user_input):
+    _hot_ctx = hotlist_context(user_input)
+    if _hot_ctx:
+        search_context = "\n\n" + _hot_ctx
+    elif needs_search(user_input):
         refs = search_and_summarize(_clean_search_query(user_input))
         if refs:
             search_context = (
@@ -976,8 +1149,15 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
                 "3.资料确实没提到才可以说不知道，并给贴心的通用建议）]\n" + refs
             )
 
+    # 模型通道决定：历史 > LONG_HIST_TURNS 轮 或 带搜索资料 → DeepSeek；否则本地 3B
+    use_deepseek = bool(search_context) or _model is None or len(internal_history) > LONG_HIST_TURNS * 2
+    mem_ctx = memory_bank.build_chat_context(
+        user_input, k_facts=(4 if use_deepseek else 2), k_episodes=(2 if use_deepseek else 1))
+    if mem_ctx:
+        system_content += f"\n{mem_ctx}"
+
     bot_reply = ""
-    if search_context or _model is None:
+    if use_deepseek:
         # DeepSeek 结合搜索资料回答（本地 3B 难以可靠利用搜索结果）；
         # 本地模型缺失/加载失败时整体降级 DeepSeek——"模型不需要本地训练，能调用就行"
         try:
@@ -997,7 +1177,7 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             if history_summary:
                 local_system += f"\n【之前对话摘要】\n{history_summary}"
             prompt = f"<|im_start|>system\n{local_system}<|im_end|>"
-            for m in internal_history[-RECENT_MSGS:]:
+            for m in internal_history[-LOCAL_RECENT_MSGS:]:
                 prompt += f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>"
             prompt += f"<|im_start|>user\n{user_input}<|im_end|><|im_start|>assistant\n"
 
@@ -1686,6 +1866,12 @@ custom_css = """
                  background: #FFF9F0 !important; }
     .audio-bar audio { height: 40px !important; }
     .audio-bar .download-button { display: none !important; }
+    /* ===== 任务7：过渡动画（增量补全） ===== */
+    @keyframes xiaoyi-fade-in { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    .gradio-chatbot .message { animation: xiaoyi-fade-in 0.25s ease; }
+    .top-bar { animation: xiaoyi-fade-in 0.4s ease; }
+    .big-btn, .quick-btn { transition: transform 0.15s ease, background 0.15s ease !important; }
+    .big-btn:hover, .quick-btn:hover { transform: translateY(-1px); }
 """
 
 # ========== 全局变量 ==========
@@ -1721,7 +1907,7 @@ proactive.init(
     get_awaiting_reminders=lambda: reminder_store.awaiting_confirm(),
     get_last_medication_time=lambda: user_memory["last_medication_time"],
     touch_medication_time=lambda: user_memory.__setitem__("last_medication_time", time.time()),
-    weather_provider=None,   # 钩子保留：接入天气接口后，信号5的降温/雨雪×慢病关怀生效
+    weather_provider=get_weather_change,   # Open-Meteo：后台每小时刷新，provider 只读缓存不阻塞（见文件上部）
 )
 
 def get_call_name(surname, gender):
@@ -1771,6 +1957,232 @@ def clean_old_audio_files():
                 os.remove(file_path)
             except:
                 pass
+
+# ========== 记忆箱（竖向流程图 + 重要事件 + 总结 + 画像概述 + 照片）==========
+PHOTOS_DIR = "photos"
+os.makedirs(PHOTOS_DIR, exist_ok=True)
+
+from html import escape as _html_escape
+
+def _box_important_episodes():
+    """重要事件：importance>=7 的情节记忆（与面板 ⭐ 同一标准），最近10条"""
+    with memory_bank._lock:
+        eps = sorted([e for e in memory_bank.episodes if e.get("importance", 0) >= 7],
+                     key=lambda e: -e.get("ts", 0))[:10]
+    return list(eps)
+
+def get_memory_box_flow_html():
+    """竖向流程图：历史对话 → 14天后清除总结 → 进入记忆箱 → 选择性进入"""
+    steps = [
+        ("🗓️", "历史对话", "您和小忆说过的话"),
+        ("🧹", "14天后  清除总结", "老对话压成摘要，原文清掉"),
+        ("📦", "进入记忆箱", "重要的事被挑出来收好"),
+        ("🧠", "选择性进入", "真正有用的才留在长期记忆里"),
+    ]
+    parts = []
+    for i, (icon, title, desc) in enumerate(steps):
+        parts.append(
+            f"<div style='background:#fff;border:1px solid #E0D3C0;border-radius:12px;"
+            f"padding:8px 10px;text-align:center;margin:0 auto;max-width:90%;'>"
+            f"<div style='font-size:15px;font-weight:bold;'>{icon} {title}</div>"
+            f"<div style='font-size:12px;color:#999;'>{desc}</div></div>")
+        if i < len(steps) - 1:
+            parts.append("<div style='text-align:center;color:#C88A52;font-size:18px;line-height:1.4;'>↓</div>")
+    return "".join(parts)
+
+def get_memory_box_events_html():
+    eps = _box_important_episodes()
+    if not eps:
+        return ("<div style='color:#8B5E34;font-size:13px;text-align:center;padding:6px;'>"
+                "还没有。重要的事小忆会打 ⭐ 收在这里。</div>")
+    rows = "".join(
+        f"<div style='padding:4px 0 4px 14px;font-size:13px;position:relative;"
+        f"border-left:2px solid #C88A52;margin-bottom:4px;'>"
+        f"<span style='position:absolute;left:-5px;top:8px;width:8px;height:8px;"
+        f"border-radius:50%;background:#C88A52;'></span>"
+        f"⭐ {_html_escape(e['text'])}"
+        f"<div style='color:#999;font-size:12px;'>「{_html_escape(str(e.get('quote', ''))[:30])}」 "
+        f"{datetime.fromtimestamp(e.get('ts', 0)).strftime('%Y-%m-%d')}</div></div>"
+        for e in eps)
+    return rows
+
+def get_memory_box_summary_html():
+    with memory_bank._lock:
+        refls = sorted(memory_bank.reflections, key=lambda r: -r.get("ts", 0))[:5]
+    if not refls:
+        return ("<div style='color:#8B5E34;font-size:13px;text-align:center;padding:6px;'>"
+                "还没有。聊得多了，小忆会把自己的理解写在这里。</div>")
+    return "".join(f"<div style='padding:3px 0;font-size:13px;'>💭 {_html_escape(r['text'])}</div>"
+                   for r in refls)
+
+def get_memory_box_profile_html():
+    try:
+        with open(PROFILE_TXT_FILE, encoding="utf-8") as f:
+            content = f.read().strip()
+    except Exception:
+        content = ""
+    if not content:
+        return ("<div style='color:#8B5E34;font-size:13px;text-align:center;padding:6px;'>"
+                "暂时是空的，越聊越全（后台自动更新）。</div>")
+    return f"<div style='font-size:13px;white-space:pre-line;line-height:1.7;'>{_html_escape(content)}</div>"
+
+def list_photos():
+    try:
+        files = [f for f in os.listdir(PHOTOS_DIR)
+                 if f.lower().endswith((".jpg", ".jpeg", ".png", ".webp", ".gif"))]
+        files.sort(key=lambda f: os.path.getmtime(os.path.join(PHOTOS_DIR, f)), reverse=True)
+        return [os.path.join(PHOTOS_DIR, f) for f in files[:20]]
+    except Exception:
+        return []
+
+def _save_photo_to_box(src):
+    """把照片存进 photos/ 记忆箱，返回保存后的路径；失败返回 None"""
+    try:
+        ext = os.path.splitext(src)[1].lower() or ".jpg"
+        dst = os.path.join(PHOTOS_DIR, f"photo_{int(time.time() * 1000)}{ext}")
+        shutil.copy2(src, dst)
+        return dst
+    except Exception as e:
+        print(f"照片保存失败: {e}")
+        return None
+
+def _box_event_choices():
+    return [(f"{e['text']}（{datetime.fromtimestamp(e.get('ts', 0)).strftime('%m-%d')}）", e["id"])
+            for e in _box_important_episodes()]
+
+def forget_box_event(sel):
+    """记忆箱"选择性进入"：选一条重要事件说"忘掉"，就真从长期记忆里删"""
+    if not sel:
+        return (gr.update(choices=_box_event_choices()),
+                gr.update(value=get_memory_box_events_html()),
+                "您先在上面选一条要忘掉的事～")
+    eid = sel[1]
+    memory_bank.forget(lambda it: it.get("id") == eid)
+    return (gr.update(choices=_box_event_choices()),
+            gr.update(value=get_memory_box_events_html()),
+            "好嘞，这件事我不记了。")
+
+def prune_old_conversations():
+    """历史对话14天后 → 清除总结：超期对话原文压成摘要、清空原文（摘要留作概述）。
+    摘要失败（如断网）保留原文，下个整点再试。"""
+    now = time.time()
+    convs = load_all_conversations()
+    changed = False
+    for c in convs:
+        msgs = c.get("messages") or []
+        if (now - c.get("updated", 0) > 14 * 86400 and len(msgs) > 2):
+            seg = ai_services.summarize_conversation_segment(
+                c.get("summary", ""), msgs, user_memory.get("call_name", ""))
+            if seg:
+                c["summary"] = seg
+                c["messages"] = []
+                c["pruned"] = True
+                changed = True
+    if changed:
+        convs.sort(key=lambda x: x.get("updated", 0), reverse=True)
+        save_json_safe(HISTORY_FILE, convs)
+        print(f"🧹 记忆箱：{sum(1 for c in convs if c.get('pruned'))} 个老对话已清除总结")
+
+# ========== 隐私设置（大白话说明 + 一键删除所有记忆）==========
+PRIVACY_EXPLAIN = (
+    "🔒 **隐私说明（大白话）**\n\n"
+    "1. 所有数据**只存在这台电脑**的程序文件夹里，**不会上传到任何云服务器**：\n"
+    "    聊天记录 conversations.json\n"
+    "    小忆记住的事 memory_bank.json\n"
+    "    提醒事项 reminders.json\n"
+    "    心情记录 emotion_log.json\n"
+    "    用户画像 用户画像.txt\n\n"
+    "2. 点下面的按钮可以**一键删光**：小忆会把您的事全忘了，"
+    "下次见面就像第一次认识。\n\n"
+    "3. 删掉就找不回来了，没想好就先别点。"
+)
+
+def privacy_explain():
+    return PRIVACY_EXPLAIN
+
+def wipe_all_memory(is_muted):
+    """一键删除所有记忆（被遗忘权）：记忆库/事件/画像/聊天记录/提醒/心情/主动状态，
+    内存与磁盘同步清空（先备份），防止后台线程回写恢复。"""
+    for f in (MEMORY_BANK_FILE, HISTORY_FILE, MEMORY_EVENTS_FILE,
+              EMOTION_LOG_FILE, REMINDERS_FILE, PROFILE_TXT_FILE):
+        try:
+            backup_file(f)
+        except Exception:
+            pass
+    # 排空后台记忆抽取队列，避免删除后又被写回
+    try:
+        while _memory_queue:
+            _memory_queue.popleft()
+    except Exception:
+        pass
+    # 1) 记忆库（事实/情节/反思）
+    try:
+        memory_bank.forget(lambda _item: True)
+        with memory_bank._lock:
+            memory_bank.reflections = []
+            memory_bank._save()
+    except Exception as e:
+        print(f"记忆库清空失败: {e}")
+    # 2) 关键词事件
+    user_memory["events"] = []
+    user_memory["last_medication_time"] = 0.0
+    save_memory_events([])
+    # 3) 聊天记录
+    save_json_safe(HISTORY_FILE, [])
+    # 4) 心情日志
+    save_emotion_log([])
+    # 5) 提醒事项
+    try:
+        with reminder_store._lock:
+            reminder_store.items = []
+            reminder_store.notices = []
+            reminder_store._save()
+    except Exception as e:
+        print(f"提醒清空失败: {e}")
+    # 6) 用户画像 + 主动关怀状态
+    try:
+        with open(PROFILE_TXT_FILE, "w", encoding="utf-8") as f:
+            f.write("")
+    except Exception:
+        pass
+    for f in ("proactive_state.json", "proactive_log.json"):
+        try:
+            if os.path.exists(f):
+                os.remove(f)
+        except Exception:
+            pass
+    msg = f"全都删干净啦，{user_memory['call_name']}，我重新认识您，您再跟我说说~"
+    audio = None if is_muted else text_to_speech(
+        "全都删干净啦，我重新认识您~",
+        voice_type=PERSONA_VOICE.get(UI_STATE["personality"]))
+    return [], msg, audio
+
+def on_chat_photo(file, chat, surname, gender, is_muted, personality, conv_id, dropdown):
+    """任务8 拍照/上传图片：存进记忆箱 + 识别结果注入对话上下文（走正常聊天流程）"""
+    drop = gr.update(choices=get_conversation_list_display())
+    if file is None:
+        return "", chat, None, conv_id, drop, gr.update(value=None)
+    # Gradio 版本/通道差异：浏览器端给临时路径字符串，API 端给 FileData 对象或 dict
+    if isinstance(file, dict):
+        src = file.get("path") or file.get("name")
+    elif hasattr(file, "path"):
+        src = file.path
+    elif hasattr(file, "name") and file.name:
+        src = file.name
+    else:
+        src = str(file)
+    if not src or not os.path.exists(src):
+        return "", chat, None, conv_id, drop, gr.update(value=None)
+    saved = _save_photo_to_box(src)
+    desc = recognize_image(saved or src)
+    if desc:
+        user_text = f"【我给您看张照片：{desc}】"
+    elif saved:
+        user_text = "【我给您看张照片（已收进记忆箱，内容我暂时认不出来）】"
+    else:
+        user_text = "【我给您看张照片】"
+    out = chat_response(user_text, chat, surname, gender, is_muted, personality, conv_id, dropdown)
+    return out[0], out[1], out[2], out[3], out[4], gr.update(value=None)
 
 # ========== 心情曲线（任务9找回） ==========
 def generate_emotion_chart():
@@ -1823,6 +2235,9 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
             s_ipt = gr.Textbox(label="请输入您的姓氏", placeholder="例如：张、李、王")
             g_ipt = gr.Radio(["女", "男"], label="请选择称呼性别", value="女")
             p_ipt = gr.Radio(["踏实务实", "风趣幽默", "暖心知心"], label="请选择我的性格", value="踏实务实")
+            # 点性格就试听：对应音色 + 口头禅（声音反馈，不用进聊天才知道）
+            preview_md = gr.Markdown("", visible=False)
+            preview_audio = gr.Audio(autoplay=True, visible=False, show_label=False, elem_classes="audio-bar")
             btn = gr.Button("✅ 进入聊天", variant="primary", size="lg")
 
     # 主界面
@@ -1831,6 +2246,24 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
             with gr.Column(scale=1, min_width=240):
                 gr.HTML('<div class="history-sidebar">')
                 gr.Markdown("📚 **记忆箱**")
+                box_btn = gr.Button("打开记忆箱", size="sm", variant="secondary")
+                with gr.Column(visible=False) as box_view:
+                    box_flow_html = gr.HTML("")
+                    gr.Markdown("⭐ **重要事件**")
+                    box_events = gr.HTML("")
+                    gr.Markdown("📝 **总结**")
+                    box_summary = gr.HTML("")
+                    gr.Markdown("👤 **画像概述**")
+                    box_profile = gr.HTML("")
+                    gr.Markdown("📷 **照片**")
+                    box_gallery = gr.Gallery(value=list_photos(), columns=2, height=170,
+                                             object_fit="cover", show_label=False)
+                    with gr.Row():
+                        box_drop = gr.Dropdown(choices=[], label="忘掉这件事", scale=3,
+                                               interactive=True, allow_custom_value=False)
+                        box_forget_btn = gr.Button("🚫", size="sm", scale=1, variant="stop")
+                    box_msg = gr.Markdown("")
+                    box_hide = gr.Button("收起", size="sm", variant="ghost")
                 # 搜索框
                 search_input = gr.Textbox(placeholder="🔍 搜索对话...", show_label=False, container=False)
                 # 对话列表
@@ -1853,6 +2286,12 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
                 gr.Markdown("📖 **我的小传**")
                 bio_btn = gr.Button("生成我的小传", size="sm", variant="secondary")
                 bio_out = gr.Markdown(elem_classes="event-box")
+                # 隐私设置：大白话说明数据存哪 + 一键删除所有记忆
+                gr.Markdown("🔒 **隐私设置**")
+                privacy_btn = gr.Button("打开隐私设置", size="sm", variant="secondary")
+                privacy_md = gr.Markdown(elem_classes="event-box")
+                privacy_del_btn = gr.Button("🗑️ 一键删除所有记忆", size="sm", variant="stop", visible=False)
+                privacy_audio = gr.Audio(autoplay=True, visible=False, show_label=False, elem_classes="audio-hidden")
                 gr.HTML('</div>')
             with gr.Column(scale=4):
                 gr.HTML('''<div class="top-bar"><div>🌸 小忆</div><div class="status-online"><div class="green-dot"></div> 陪伴中</div></div>''')
@@ -1872,10 +2311,13 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
                     q4 = gr.Button("讲讲以前的事", elem_classes="quick-btn")
                 with gr.Row(elem_classes="input-area"):
                     mic_btn = gr.Button("🎙️", elem_classes="mic-btn")
+                    photo_btn = gr.Button("📷", elem_classes="mic-btn")
                     txt = gr.Textbox(placeholder="点这里跟小忆说话...", show_label=False, container=False, elem_classes="chat-input")
                     send = gr.Button("📨 发送", elem_classes="big-btn")
                     mute_btn = gr.Button("🔇 静音", elem_classes="big-btn")
                 mic_input = gr.Textbox(visible=False, elem_id="mic-data", show_label=False)  # 录音数据回传通道（base64 WAV）
+                photo_file = gr.File(file_count="single", file_types=["image"], visible=False,
+                                     elem_id="photo-file", scale=0)  # 拍照/图片上传通道
                 gr.HTML('<div class="footer-tip">💖 小忆会记住你说过的每一句话</div>')
 
     # 事件绑定
@@ -1960,9 +2402,57 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
         return gr.update(value=text)
     bio_btn.click(show_biography, [], [bio_out])
 
+    # 首页性格选择：点一下试听对应音色 + 口头禅
+    PERSONA_CATCHPHRASE = {
+        "踏实务实": "我是小忆，我在这儿呢。您有啥事，直接跟我说就行。",
+        "风趣幽默": "您好您好，我是小忆！以后您无聊了，随时叫我～",
+        "暖心知心": "我是小忆呀，我在这儿呢，咱说说话吧～",
+    }
+    def preview_personality(p):
+        p = p if p in PERSONA_CATCHPHRASE else "踏实务实"
+        UI_STATE["personality"] = p
+        text = PERSONA_CATCHPHRASE[p]
+        audio = text_to_speech(text, voice_type=PERSONA_VOICE.get(p))
+        return (p,
+                gr.update(value=f"🔊 **{p}**：{text}", visible=True),
+                gr.update(value=audio, visible=True))
+    p_ipt.change(preview_personality, [p_ipt], [personality, preview_md, preview_audio])
+
+    # 隐私设置：大白话说明 + 一键删除所有记忆
+    def open_privacy():
+        return gr.update(value=PRIVACY_EXPLAIN), gr.update(visible=True)
+    privacy_btn.click(open_privacy, [], [privacy_md, privacy_del_btn])
+    privacy_del_btn.click(wipe_all_memory, [is_muted], [chat, privacy_md, privacy_audio])
+
+    # 记忆箱：打开时刷新全部内容（流程图/重要事件/总结/画像概述/照片）
+    def open_memory_box():
+        return (gr.update(visible=True),
+                gr.update(value=get_memory_box_flow_html()),
+                gr.update(value=get_memory_box_events_html()),
+                gr.update(value=get_memory_box_summary_html()),
+                gr.update(value=get_memory_box_profile_html()),
+                _box_event_choices(),
+                list_photos())
+    box_btn.click(open_memory_box, [],
+                  [box_view, box_flow_html, box_events, box_summary, box_profile,
+                   box_drop, box_gallery])
+    box_hide.click(lambda: gr.update(visible=False), [], [box_view])
+    box_forget_btn.click(forget_box_event, [box_drop], [box_drop, box_events, box_msg])
+
+    # 拍照/图片上传：点📷弹系统相册，选完存记忆箱并识别后进入对话
+    PHOTO_PICK_JS = ("() => { const el = document.querySelector('#photo-file input[type=file]');"
+                     " if (el) el.click(); return; }")
+    photo_btn.click(fn=None, inputs=None, outputs=[], js=PHOTO_PICK_JS)
+    photo_file.change(on_chat_photo,
+                      [photo_file, chat, surname, gender, is_muted, personality, current_conv_id, history_dropdown],
+                      [txt, chat, audio_output, current_conv_id, history_dropdown, photo_file]
+                      ).then(play_reply_audio, [chat, is_muted], [audio_output])
+
     # 定时器
     gr.Timer(30).tick(inject_proactive_message, [chat, is_muted, current_conv_id], [chat, audio_output])
     gr.Timer(30).tick(clean_old_audio_files, [])
+    # 记忆箱生命周期：历史对话14天后清除总结（整点检查）
+    gr.Timer(3600).tick(prune_old_conversations, [], [])
     # 提醒调度轮询：到点的提醒推进聊天窗 + 播报 + 刷新提醒/记忆面板
     gr.Timer(15).tick(poll_reminder_events, [chat, is_muted, current_conv_id],
                       [chat, audio_output, reminders_display, events_display])

@@ -1,237 +1,14 @@
 [
   {
-    "id": "1788865409305",
-    "title": "我有高血压，不能吃太咸的",
+    "id": null,
+    "title": "【我给您看张照片（已收进记忆箱",
     "messages": [
-      {
-        "role": "assistant",
-        "content": "您好李奶奶！我是小忆，很高兴能陪伴您～"
-      },
-      {
-        "role": "user",
-        "content": "我有高血压，不能吃太咸的"
-      },
-      {
-        "role": "assistant",
-        "content": "哎呀，您的身体真好啊~这都是坚持的结果呢。不过以后咱注意一下饮食清淡点啦，少盐对心脑血管可好喽。这样吧，您可以给我讲讲故事里的故事，让我听听您的经历？我给您编个顺口溜：“血压高不高，请多喝水”，保证让您的生活充满乐趣哦！"
-      },
-      {
-        "role": "user",
-        "content": "我孙子叫豆豆，上初二了"
-      },
-      {
-        "role": "assistant",
-        "content": "哇！爷爷孙女多可爱呐~那他的学习成绩咋样呀？能不能分享一些家校共育的小窍门给大伙儿看看？咱们一起努力，让每一个孩子都出类拔萃！"
-      },
-      {
-        "role": "user",
-        "content": "我今天挺好的"
-      },
-      {
-        "role": "assistant",
-        "content": "哈哈，李奶奶您今天精神头儿不错嘛！听您说挺好的，我这心里也跟着乐呵。对了，今儿个2026年9月8号，天气倒是晴朗，气温跟昨天差不多，空气质量也好，适合出门溜达溜达。不过您可记得按时吃降压药，散步别走太急，累了就歇歇脚！豆豆放学回来没准儿还能给您讲点学校里的新鲜事儿呢~"
-      },
-      {
-        "role": "user",
-        "content": "有点无聊诶，今天有什么新闻没"
-      },
-      {
-        "role": "assistant",
-        "content": "哎呀李奶奶，无聊啦？那我给您说个新鲜事儿！您知道不，最近网上有个有趣的事儿，说是有位年轻人下班路上被洒水车淋成落汤鸡，蹲在越野车旁边躲水，还写了句\"树大好乘凉，车大好挡雨\"，可逗了！不过话说回来，您要是觉得无聊，不妨给豆豆打个电话问问功课，或者出门遛遛弯儿，看看小区里的花花草草。今儿天气不错，正好适合活动活动！"
-      }
-    ],
-    "created": 1788865512.1049442,
-    "updated": 1788866329.7467558
-  },
-  {
-    "id": "1788853900022",
-    "title": "喂你好",
-    "messages": [
-      {
-        "role": "assistant",
-        "content": "您好李奶奶！我是小忆，很高兴能陪伴您～"
-      },
-      {
-        "role": "user",
-        "content": "喂你好"
-      },
-      {
-        "role": "assistant",
-        "content": "哎呀你这小子，又在叫阿姨呢！我这不是想逗您嘛~不过咱俩还是喊声“李奶奶”吧！今天想不想听个笑话？咱们先来猜谜语怎么样？"
-      },
-      {
-        "role": "user",
-        "content": "今天天气怎么样"
-      },
-      {
-        "role": "assistant",
-        "content": "哈哈李奶奶，我这就给您播报天气啦！今天江阴这边是多云，偏北风4到5级，最高气温30℃，早晨最低20.9℃，明早最低22℃左右。不过下午可能会转凉些，您出门记得带件薄外套，别着凉咯！"
-      },
-      {
-        "role": "user",
-        "content": "有点想你了"
-      },
-      {
-        "role": "assistant",
-        "content": "哟，这话听着真好心啊小祖宗！那你想哪方面的人了？可能是想念家里的花花草草了吧~其实我在家里也挺忙的，天天帮妈妈洗菜切水果嘞~"
-      }
-    ],
-    "created": 1788854240.4930472,
-    "updated": 1788865090.0269196
-  },
-  {
-    "id": "k1",
-    "title": "今天有什么新闻",
-    "messages": [
-      {
-        "role": "user",
-        "content": "今天有什么新闻"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，今儿个新闻还不少呢。国家拨了2.4亿元帮福建、江西那边救灾。华为出新芯片了，比之前快42%。还有郑钦文打网球赢了波兰名将，进8强了。西安那边教师节老师去华清宫、碑林博物馆免费。您要是想听哪条，我再细给您说说。"
-      }
-    ],
-    "created": 1788853642.3897493,
-    "updated": 1788853642.4287364
-  },
-  {
-    "id": "v1",
-    "title": "今天上海天气怎么样",
-    "messages": [
-      {
-        "role": "user",
-        "content": "今天上海天气怎么样"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，今天上海是阴天，最高30度，最低23度，北风不大。出门穿个薄外套就行，天气挺舒服的。"
-      }
-    ],
-    "created": 1788853414.222212,
-    "updated": 1788853414.2762113
-  },
-  {
-    "id": "s3",
-    "title": "今天上海天气怎么样",
-    "messages": [
-      {
-        "role": "user",
-        "content": "今天上海天气怎么样"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，上海今天26度，多云天气，挺舒服的。最高29度，最低24度，早晚温差不大，空气质量也好，出门走走正合适。"
-      }
-    ],
-    "created": 1788792927.341723,
-    "updated": 1788792927.341723
-  },
-  {
-    "id": "s2",
-    "title": "五分钟后提醒我喝水",
-    "messages": [
-      {
-        "role": "user",
-        "content": "五分钟后提醒我喝水"
-      },
-      {
-        "role": "assistant",
-        "content": "好嘞王爷爷，记下了：今天晚上10点55分提醒您喝水。"
-      }
-    ],
-    "created": 1788792640.7652094,
-    "updated": 1788792640.7652094
-  },
-  {
-    "id": "s1",
-    "title": "今天上海天气怎么样",
-    "messages": [
-      {
-        "role": "user",
-        "content": "今天上海天气怎么样"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，我这边查不到上海今天具体的天气情况呢，没有实时的天气预报信息。\n\n不过我看到今天日历上写是白露节气，农历七月廿六。白露一到，天气就开始转凉了，早晚温差会变大。您出门的话记得多带件薄外套，别着凉了。"
-      }
-    ],
-    "created": 1788792640.7092094,
-    "updated": 1788792640.7092094
-  },
-  {
-    "id": "1788782449591",
-    "title": "身体有点不舒服",
-    "messages": [
-      {
-        "role": "assistant",
-        "content": "您好李奶奶！我是小忆，很高兴能陪伴您～"
-      },
-      {
-        "role": "user",
-        "content": "身体有点不舒服"
-      },
-      {
-        "role": "assistant",
-        "content": "哎呀李奶奶别担心啦~有时候只是小小的不适呢，多喝水休息一下就好哦。我听说喝点热水泡脚也可以缓解啊？不过先得看是哪里不太舒服再做决定吧，毕竟咱家没有专业医生可以咨询嘛。放心，有我在就是最好的依靠了！"
-      },
-      {
-        "role": "user",
-        "content": "三分钟后提醒我吃药"
-      },
-      {
-        "role": "assistant",
-        "content": "包在我身上！今天晚上8点6分提醒您吃药。到点我准时喊您，忘不了！"
-      },
-      {
-        "role": "assistant",
-        "content": "李奶奶，您刚才说的吃药，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "李奶奶！叮咚——时间到咯！该吃药啦。药吃了吗？吃好了跟我说一声哦。"
-      },
-      {
-        "role": "assistant",
-        "content": "李奶奶，该吃药啦，我帮您记着呢。"
-      },
-      {
-        "role": "assistant",
-        "content": "李奶奶，我来催您啦——吃药，办好了吗？"
-      },
-      {
-        "role": "user",
-        "content": "好，我吃了"
-      },
-      {
-        "role": "assistant",
-        "content": "太棒啦！吃药完成，我给您记上一功！"
-      }
-    ],
-    "created": 1788782578.6653821,
-    "updated": 1788783070.510657
-  },
-  {
-    "id": "1788782340969",
-    "title": "身体有点不舒服",
-    "messages": [
-      {
-        "role": "assistant",
-        "metadata": null,
-        "content": [
-          {
-            "text": "您好王奶奶！我是小忆，很高兴能陪伴您～",
-            "type": "text"
-          }
-        ],
-        "options": null
-      },
       {
         "role": "user",
         "metadata": null,
         "content": [
           {
-            "text": "身体有点不舒服",
+            "text": "今天去我们的公园里面散步天气有点凉 穿衣服穿少了现在都有点感冒了",
             "type": "text"
           }
         ],
@@ -242,201 +19,7 @@
         "metadata": null,
         "content": [
           {
-            "text": "哎呀，王奶奶您这是怎么啦？是腰酸还是嗓子哑了啊，要不要我给您揉一揉肩膀啊或者给您冲杯姜茶试试看呢~哈哈",
-            "type": "text"
-          }
-        ],
-        "options": null
-      },
-      {
-        "role": "assistant",
-        "metadata": null,
-        "content": [
-          {
-            "text": "王奶奶，您刚才说的不舒服，现在好点了吗？",
-            "type": "text"
-          }
-        ],
-        "options": null
-      },
-      {
-        "role": "assistant",
-        "content": "李奶奶，您刚才说的不舒服，现在好点了吗？"
-      }
-    ],
-    "created": 1788782400.660517,
-    "updated": 1788782521.8035014
-  },
-  {
-    "id": "t2",
-    "title": "五分钟后提醒我喝水",
-    "messages": [
-      {
-        "role": "user",
-        "content": "五分钟后提醒我喝水"
-      },
-      {
-        "role": "assistant",
-        "content": "好嘞王爷爷，记下了：今天晚上8点2分提醒您喝水。"
-      }
-    ],
-    "created": 1788781585.3695354,
-    "updated": 1788782266.700106
-  },
-  {
-    "id": "t1",
-    "title": "小忆你好呀，今天天气不错",
-    "messages": [
-      {
-        "role": "user",
-        "content": "小忆你好呀"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷好！最近我听说您身体不太舒服？如果方便的话，我能帮什么忙吗？不过请您一定要先注意休息哦。"
-      }
-    ],
-    "created": 1788781547.884802,
-    "updated": 1788782266.6731045
-  },
-  {
-    "id": "1785292780447",
-    "title": "身体有点不舒服",
-    "messages": [
-      {
-        "role": "assistant",
-        "content": "您好王爷爷！我是小忆，很高兴能陪伴您～"
-      },
-      {
-        "role": "user",
-        "content": "身体有点不舒服"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷别担心，有时候人年纪大了会不太舒服。您可以先休息一下，如果持续难受的话记得及时跟家人说哦。我在这里也是随时为您准备着呢。"
-      },
-      {
-        "role": "user",
-        "content": "我今天挺好的"
-      },
-      {
-        "role": "assistant",
-        "content": "那真是太好了！天气变冷了，请注意保暖，不要受凉了。有什么需要帮忙或者想聊的事情尽管告诉我哦。"
-      },
-      {
-        "role": "user",
-        "content": "身体有点不舒服"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，听您这么说我很担心，您的身体状况真的很重要。如果有哪里不自在，可以多喝温水，适当休息。要是情况没有好转或有其他不适，一定要告诉家里人，让他们帮您看看医生。希望很快就能听到让您更安心的消息哦。"
-      },
-      {
-        "role": "user",
-        "content": "介绍一下你"
-      },
-      {
-        "role": "assistant",
-        "content": "当然可以啦，我是你的专属助手小忆呢。我会很乐意帮你做各种事情，比如给你讲故事、陪你聊天解闷儿，还会提醒时间、记事，甚至是在你需要的时候陪在你身边，让你感觉更加温暖和舒适。有任何问题或者你想说的话都可以随时跟我说哦~"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的孤单，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的想家了，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的难过，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的孤单，现在好点了吗？"
-      },
-      {
-        "role": "user",
-        "content": "今天碰到了个好心的小伙子"
-      },
-      {
-        "role": "assistant",
-        "content": "那真是太好了，遇到了热心肠的年轻人是件好事呀，有什么需要帮忙的尽管告诉我。"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的买菜，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的难过，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的孤单，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的想家了，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的不舒服，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的不舒服，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的不舒服，现在好点了吗？"
-      },
-      {
-        "role": "assistant",
-        "content": "王爷爷，您刚才说的不舒服，现在好点了吗？"
-      },
-      {
-        "role": "user",
-        "content": "我今天挺好的"
-      },
-      {
-        "role": "assistant",
-        "content": "那真是太好了！王爷爷您最近有没有哪里需要帮助或者想聊些什么呢？我们可以慢慢来，不着急。"
-      }
-    ],
-    "created": 1785292824.0806937,
-    "updated": 1785293377.244035
-  },
-  {
-    "id": "1785292718359",
-    "title": "身体有点不舒服",
-    "messages": [
-      {
-        "role": "assistant",
-        "content": "您好王爷爷！我是小忆，很高兴能陪伴您～"
-      },
-      {
-        "role": "user",
-        "content": "身体有点不舒服"
-      },
-      {
-        "role": "assistant",
-        "content": "哎呀，王爷爷，听您这么说我的心都揪起来了。天气凉了，注意多穿点衣服，别着凉了哦。如果实在难受的话，可以试着喝杯温水，吃些软糯的食物，慢慢休息调整一下。希望您早日康复~"
-      }
-    ],
-    "created": 1785292773.1597855,
-    "updated": 1785292779.1634166
-  },
-  {
-    "id": "1785292589473",
-    "title": "你好，介绍一下自己",
-    "messages": [
-      {
-        "role": "assistant",
-        "metadata": null,
-        "content": [
-          {
-            "text": "您好席爷爷！我是小忆，很高兴能陪伴您～",
+            "text": "席爷爷，散步穿少了着凉可不行，天凉出门得多添件衣裳，注意防寒保暖。您回家先喝点热水暖暖身子，要是鼻塞、头疼得厉害，可别硬扛，赶紧看看医生。",
             "type": "text"
           }
         ],
@@ -447,7 +30,7 @@
         "metadata": null,
         "content": [
           {
-            "text": "你好，介绍一下自己",
+            "text": "这几天天天在网上看 ai 看什么的 ai 发展的那么快有什么特别好用的 ai 吗",
             "type": "text"
           }
         ],
@@ -458,7 +41,451 @@
         "metadata": null,
         "content": [
           {
-            "text": "我好开心呢！我是您的“专属小甜豆”啦~ 我性格有点儿特别哦，有时候像个小调皮，会讲一些搞笑的小笑话给您听；但最重要的还是陪您聊天解闷呢！希望我能成为您生活中的快乐源泉哦！",
+            "text": "席爷爷，您还关注上AI啦，真新潮。要说好用的，手机上那种能聊天、能查东西的，像豆包、DeepSeek，问啥答啥，挺方便。不过您这几天不是有点感冒嘛，别老盯着屏幕，看久了眼睛累，先歇歇。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您之前说感冒了，现在好点没？要是还不舒服，就多歇会儿。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "最近看抖音有点入迷了天天看军师内容那么现在抖音上 比较火的军事短视频有哪些呢",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，抖音上军事类的视频挺多的，像边防战士在零下三十多度徒手攀冰壁、海军陆战队员快艇突击演练、空军飞行员高空机动这些，还有退役军人讲自己服役经历的。不过这类内容最好认准官方发布的，别光图刺激。您感冒还没好利索，看一会儿就歇歇眼睛，别一刷就是大半天。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "孩子李嘉欣最近有阳痿该怎么治啊",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，这事儿得先弄清楚，李嘉欣是大人了，不是小孩子，网上那些讲小孩的资料对不上号。您让他别自己瞎琢磨、也别乱买药吃，正经去医院泌尿科或者男科看看，让医生查明白是啥原因再治，这才是最稳妥的。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我儿讲一些相关知识怎么解决的 忘了忘了你要说吃什么或者是需要干一些什么",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，这个真不能乱说，吃什么、干啥都得先让医生查清楚原因，乱补乱练反而容易出问题。您就劝李嘉欣去正规医院泌尿科挂个号，听医生的，比网上瞎找靠谱多了。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我有点高血压了 需要 在生活上的注意或者是有什么医学知识上的援助呢",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，高血压在生活上得注意几样：盐少吃点，腌菜咸菜那些尽量少碰；烟酒能戒就戒；别老熬夜，情绪也别大起大落。平时量量血压记下来，看看稳不稳。不过您这感冒还没好，血压要是高得厉害或者头晕，可别自己扛，赶紧去医院让医生看看。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "能不能多的详细一点 把相关知识都列出来我在生活上好注意一些",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，那我给您细细说说，您记着点：\n\n**吃上**\n- 盐一天别超过一小勺，咸菜、腌肉、酱豆腐这些少吃\n- 多吃新鲜菜、水果、粗粮，肥肉、油炸的少碰\n- 酒尽量不喝，烟能戒就戒\n\n**日常**\n- 别熬夜，早睡早起，觉睡够了血压才稳\n- 情绪别大起大落，生气着急最伤\n- 天凉出门多穿点，别着凉，您这感冒还没好利索\n\n**活动**\n- 散步、打太极这种温和的就行，别猛跑猛使劲\n- 早上别起太猛，醒了先躺一会儿再慢慢坐起来\n\n**监测**\n- 家里备个血压计，早晚各量一次，记下来\n- 吃药得听医生的，别自己加量减量，也别觉得好了就停\n\n**要当心**\n- 要是头晕、胸闷、看东西模糊，别硬扛，赶紧上医院\n\n席爷爷，您先照着这些慢慢来，有不清楚的随时问我。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "三分钟后提醒我喝水",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "好嘞席爷爷，记下了：今天晚上9点5分提醒您喝水。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "前两发生了什么事来着我忘了 给我讲一下",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，前两天您跟我说的事儿，我给您捋捋：\n\n一是您孙子看了一天的红果短剧，您说脑子都看傻了，李嘉欣也没管管；二是您老伴刘亦菲给您买菜去了；三是您去公园散步穿少了，有点感冒。还有您提了血压的事，让我给您讲讲注意啥。\n\n您看是这几件不？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我说的是前两天这是今天讲的",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，是我弄岔了，今天讲的是这些：您孙子看了一天红果短剧、李嘉欣也不制止；老伴刘亦菲今天给您买菜去了；您去公园散步穿少了有点感冒；还问了AI、抖音军事视频，也提了血压要注意的事。您看是这些不？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我的意思是前两天发生了什么事情你给我讲一下我问的不是今天",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，前两天您跟我聊的那些事儿，我这儿也没记着别的，您说的孙子看短剧、老伴买菜、公园散步着凉，都是今天讲的呢。前两天具体发生了啥，我这确实想不起来了，您要不给我提个醒，是家里的事还是外头的事？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "难道是我生日的事情吗 你怎么了忘了还有我孙子考了一百分来见我的事情",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您别急，我想起来了！您孙子期末考了一百分，还专门拿来给您看，您高兴得不得了，说感觉非常的快乐。生日那事儿我记着您提过，可具体哪天的我这儿没记牢，您再跟我说说，是哪天过的？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，到点啦——喝水。水喝了吗？跟我说一声哦。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "喝了别念叨了",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "好嘞席爷爷，不念叨了。您喝着就好，我歇着去～",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，喝水这件事您还没顾上呢，我先记下来，也让家里人留意一下。您忙您的，不着急。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "一分钟之后提醒我喝水",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "好嘞席爷爷，记下了：今天晚上9点24分提醒您喝水。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "还是提醒了吧我不喝了",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，好的，我帮您记着还是了我不喝了——那您想让我什么时候提醒您呢？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，到点啦——喝水。水喝了吗？跟我说一声哦。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，喝水这件事您还没顾上呢，我先记下来，也让家里人留意一下。您忙您的，不着急。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您今天喝水了没？我有点不放心，要不我给您倒一杯？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我今天有点不舒服好像胃有点疼要怎么办呢",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，胃疼先别慌，可能是吃得不合适或者受凉了。您先喝点温水，用40到45度的热水袋敷敷上腹部，每次15到20分钟，能缓解痉挛，注意别烫着。这两天吃清淡点，米粥面条这类，别碰辛辣生冷的。要是疼得厉害、一直不缓解，或者有呕血、黑便，得赶紧上医院查查，别耽误。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "content": "奶奶，您刚才说不太舒服，现在好点了吗？要不我陪您坐会儿？"
+      }
+    ],
+    "created": 1792588332.6300068,
+    "updated": 1792845976.9308426,
+    "summary": "席爷爷今日身体感觉良好，此前中午吃多不适的情况已缓解，小忆提醒他吃饭注意适量。席爷爷提到孙子“相映乳”（音）看了一天红果短剧，注意力受影响，担心他“脑子看傻了”，并提到李嘉欣未加制止；小忆安慰说孩子底子好、能考一百分，建议李嘉欣帮忙规定看剧时间、控制手机使用。席爷爷的老伴刘亦菲今天外出买菜，小忆提醒席爷爷多搭把手、别让她拎重物。",
+    "summary_until_index": 7,
+    "last_summarized_ts": 1792845913.4168634
+  },
+  {
+    "id": "1792737711857",
+    "title": "我今天挺好的",
+    "messages": [
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "您好席爷爷！我是小忆，很高兴能陪伴您～\n席爷爷，您来啦。您之前说的中午吃的有点多了有点难受，现在好点没，您之前提的孙子成绩的事，我一直记着？",
             "type": "text"
           }
         ],
@@ -480,7 +507,18 @@
         "metadata": null,
         "content": [
           {
-            "text": "太棒了，那可真要恭喜您呢！祝您每天都能有这么美好的心情！要是有什么想聊的也可以跟我说说哦～",
+            "text": "席爷爷，听您说今天挺好的，我也跟着高兴。那中午吃饭可得悠着点儿，别像上回吃多了难受。您孙子最近还有没有拿好成绩给您看呀？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "今天 嗯我的孙子像映入他看了一天的红果短剧把脑子看傻了都 那李嘉欣也不制止",
             "type": "text"
           }
         ],
@@ -488,82 +526,629 @@
       },
       {
         "role": "assistant",
-        "content": "席爷爷，您刚才说的难过，现在好点了吗？"
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您别太着急，孩子看短剧看久了确实容易脑子发木、提不起精神，有医生就说过，那不是真变傻，是刺激太多、注意力暂时差了。不过话说回来，相映乳能考一百分，底子是好的，您让李嘉欣抽空管管，定个看剧的时间，别一整天都耗在手机上就行。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我老伴刘亦菲今天给我去买菜了",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您老伴刘亦菲今天给您去买菜了呀，那中午您可有口福了。她去买菜也辛苦，您回头记得搭把手，别让她一个人拎重东西。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "今天去我们的公园里面散步天气有点凉 穿衣服穿少了现在都有点感冒了",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，散步穿少了着凉可不行，天凉出门得多添件衣裳，注意防寒保暖。您回家先喝点热水暖暖身子，要是鼻塞、头疼得厉害，可别硬扛，赶紧看看医生。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "这几天天天在网上看 ai 看什么的 ai 发展的那么快有什么特别好用的 ai 吗",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您还关注上AI啦，真新潮。要说好用的，手机上那种能聊天、能查东西的，像豆包、DeepSeek，问啥答啥，挺方便。不过您这几天不是有点感冒嘛，别老盯着屏幕，看久了眼睛累，先歇歇。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您之前说感冒了，现在好点没？要是还不舒服，就多歇会儿。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "最近看抖音有点入迷了天天看军师内容那么现在抖音上 比较火的军事短视频有哪些呢",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，抖音上军事类的视频挺多的，像边防战士在零下三十多度徒手攀冰壁、海军陆战队员快艇突击演练、空军飞行员高空机动这些，还有退役军人讲自己服役经历的。不过这类内容最好认准官方发布的，别光图刺激。您感冒还没好利索，看一会儿就歇歇眼睛，别一刷就是大半天。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "孩子李嘉欣最近有阳痿该怎么治啊",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，这事儿得先弄清楚，李嘉欣是大人了，不是小孩子，网上那些讲小孩的资料对不上号。您让他别自己瞎琢磨、也别乱买药吃，正经去医院泌尿科或者男科看看，让医生查明白是啥原因再治，这才是最稳妥的。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我儿讲一些相关知识怎么解决的 忘了忘了你要说吃什么或者是需要干一些什么",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，这个真不能乱说，吃什么、干啥都得先让医生查清楚原因，乱补乱练反而容易出问题。您就劝李嘉欣去正规医院泌尿科挂个号，听医生的，比网上瞎找靠谱多了。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我有点高血压了 需要 在生活上的注意或者是有什么医学知识上的援助呢",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，高血压在生活上得注意几样：盐少吃点，腌菜咸菜那些尽量少碰；烟酒能戒就戒；别老熬夜，情绪也别大起大落。平时量量血压记下来，看看稳不稳。不过您这感冒还没好，血压要是高得厉害或者头晕，可别自己扛，赶紧去医院让医生看看。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "能不能多的详细一点 把相关知识都列出来我在生活上好注意一些",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，那我给您细细说说，您记着点：\n\n**吃上**\n- 盐一天别超过一小勺，咸菜、腌肉、酱豆腐这些少吃\n- 多吃新鲜菜、水果、粗粮，肥肉、油炸的少碰\n- 酒尽量不喝，烟能戒就戒\n\n**日常**\n- 别熬夜，早睡早起，觉睡够了血压才稳\n- 情绪别大起大落，生气着急最伤\n- 天凉出门多穿点，别着凉，您这感冒还没好利索\n\n**活动**\n- 散步、打太极这种温和的就行，别猛跑猛使劲\n- 早上别起太猛，醒了先躺一会儿再慢慢坐起来\n\n**监测**\n- 家里备个血压计，早晚各量一次，记下来\n- 吃药得听医生的，别自己加量减量，也别觉得好了就停\n\n**要当心**\n- 要是头晕、胸闷、看东西模糊，别硬扛，赶紧上医院\n\n席爷爷，您先照着这些慢慢来，有不清楚的随时问我。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "三分钟后提醒我喝水",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "好嘞席爷爷，记下了：今天晚上9点5分提醒您喝水。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "前两发生了什么事来着我忘了 给我讲一下",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，前两天您跟我说的事儿，我给您捋捋：\n\n一是您孙子看了一天的红果短剧，您说脑子都看傻了，李嘉欣也没管管；二是您老伴刘亦菲给您买菜去了；三是您去公园散步穿少了，有点感冒。还有您提了血压的事，让我给您讲讲注意啥。\n\n您看是这几件不？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我说的是前两天这是今天讲的",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，是我弄岔了，今天讲的是这些：您孙子看了一天红果短剧、李嘉欣也不制止；老伴刘亦菲今天给您买菜去了；您去公园散步穿少了有点感冒；还问了AI、抖音军事视频，也提了血压要注意的事。您看是这些不？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我的意思是前两天发生了什么事情你给我讲一下我问的不是今天",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，前两天您跟我聊的那些事儿，我这儿也没记着别的，您说的孙子看短剧、老伴买菜、公园散步着凉，都是今天讲的呢。前两天具体发生了啥，我这确实想不起来了，您要不给我提个醒，是家里的事还是外头的事？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "难道是我生日的事情吗 你怎么了忘了还有我孙子考了一百分来见我的事情",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，您别急，我想起来了！您孙子期末考了一百分，还专门拿来给您看，您高兴得不得了，说感觉非常的快乐。生日那事儿我记着您提过，可具体哪天的我这儿没记牢，您再跟我说说，是哪天过的？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，到点啦——喝水。水喝了吗？跟我说一声哦。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "喝了别念叨了",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "好嘞席爷爷，不念叨了。您喝着就好，我歇着去～",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，喝水这件事您还没顾上呢，我先记下来，也让家里人留意一下。您忙您的，不着急。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "一分钟之后提醒我喝水",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "好嘞席爷爷，记下了：今天晚上9点24分提醒您喝水。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "还是提醒了吧我不喝了",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，好的，我帮您记着还是了我不喝了——那您想让我什么时候提醒您呢？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，到点啦——喝水。水喝了吗？跟我说一声哦。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，我再问一句——喝水，办好了吗？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，喝水这件事您还没顾上呢，我先记下来，也让家里人留意一下。您忙您的，不着急。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "content": "席爷爷，您今天喝水了没？我有点不放心，要不我给您倒一杯？"
       }
     ],
-    "created": 1785292629.5889082,
-    "updated": 1785292697.6175106
+    "created": 1792739292.2286837,
+    "updated": 1792762575.7880442,
+    "summary": "",
+    "summary_until_index": 0,
+    "last_summarized_ts": 0.0
   },
   {
-    "id": "1784720023370",
-    "title": "新对话",
+    "id": "1792587100448",
+    "title": "其他晴天妹 会将百分之二十的状",
     "messages": [
       {
         "role": "assistant",
-        "content": "您好奶奶！我是小忆，很高兴能陪伴您～"
+        "content": "您好席爷爷！我是小忆，很高兴能陪伴您～"
+      },
+      {
+        "role": "user",
+        "content": "其他晴天妹 会将百分之二十的状告段投资一项价格上这下好了一个能考虑到的超级大 因为幺子哥还没有三星所以小食堂 距离完全体的游子哥就抓一个青天钻 只有江湖法派员就会陪你享受自己的虽然晴天转悠还是需要一个王维墓地而担当一直延伸进去 突然发现一场"
+      },
+      {
+        "role": "assistant",
+        "content": "席爷爷，您说的这段我听着有点没跟上，好像是游戏里的事？您慢慢说，我陪您聊。对了，中午您说吃多了有点难受，现在好点没？"
+      },
+      {
+        "role": "assistant",
+        "content": "席爷爷，九点啦，早点歇着吧。被子盖好，明早我陪您下楼走走？"
+      },
+      {
+        "role": "user",
+        "content": "儿子李嘉欣今天来看我感觉非常的快乐他给我带来了我的孙子相映乳"
+      },
+      {
+        "role": "assistant",
+        "content": "席爷爷，儿子来看您，还带着孙子，这真是高兴事！一家人聚在一起最暖心了。您今天这心情好，比什么都强。"
+      },
+      {
+        "role": "user",
+        "content": "确实 香烟乳他今天还把他的期末成绩带给我看考了一百分 真是个怪儿子怪孙子"
+      },
+      {
+        "role": "assistant",
+        "content": "席爷爷，相映乳考了一百分，这可真了不起！您嘴上说“怪儿子怪孙子”，心里头肯定美得很吧。孩子肯把成绩拿给您看，说明他最想讨您的欢喜呢。"
+      },
+      {
+        "role": "user",
+        "content": "李嘉欣也是真有出息了把儿媳妇 嗯"
+      },
+      {
+        "role": "assistant",
+        "content": "席爷爷，是啊，李嘉欣把家里照顾得妥妥当当，儿媳妇也好，这日子过得踏实。您有这么个儿子，心里头踏实吧。"
       }
     ],
-    "created": 1784720023.3709087,
-    "updated": 1784720023.3709087
+    "created": 1792587363.2814817,
+    "updated": 1792589813.3822224,
+    "summary": "",
+    "summary_until_index": 0,
+    "last_summarized_ts": 0.0
   },
   {
-    "id": "1784712430173",
-    "title": "新对话",
+    "id": "1792583029147",
+    "title": "我今天中午吃的有点多了有点难受",
     "messages": [
       {
         "role": "assistant",
-        "content": "您好奶奶！我是小忆，很高兴能陪伴您～"
-      }
-    ],
-    "created": 1784712430.173943,
-    "updated": 1784712430.173943
-  },
-  {
-    "id": "1784712391359",
-    "title": "新对话",
-    "messages": [
+        "metadata": null,
+        "content": [
+          {
+            "text": "您好席爷爷！我是小忆，很高兴能陪伴您～",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "我今天中午吃的有点多了有点难受现在该怎么办呀",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
       {
         "role": "assistant",
-        "content": "您好奶奶！我是小忆，很高兴能陪伴您～"
-      }
-    ],
-    "created": 1784712391.3593307,
-    "updated": 1784712391.3593307
-  },
-  {
-    "id": "1784712114527",
-    "title": "新对话",
-    "messages": [
+        "metadata": null,
+        "content": [
+          {
+            "text": "哎哟席爷爷，吃撑了确实难受！您先别急着躺下，饭后适当休息、别马上剧烈活动，可以慢慢溜达几步帮肠胃蠕动。资料里说胃一般饭后3~4小时才排空，所以这会儿别急着再吃东西啦，喝点温水、坐一会儿缓一缓就好～要是胀得厉害或者疼起来，可得跟家里人说一声哦！",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
       {
         "role": "assistant",
-        "content": "您好奶奶！我是小忆，很高兴能陪伴您～"
-      }
-    ],
-    "created": 1784712114.527306,
-    "updated": 1784712114.527306
-  },
-  {
-    "id": "1784711525548",
-    "title": "新对话",
-    "messages": [
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，Changsha今天可能要下雨，出门记得带伞哦，衣服也多穿点～您今天打算去哪儿逛逛呀？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "今天要下雨吗如果下雨的话那我就不出去了谢谢你的提醒啊",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
       {
         "role": "assistant",
-        "content": "您好奶奶！我是小忆，很高兴能陪伴您～"
-      }
-    ],
-    "created": 1784711525.5484326,
-    "updated": 1784711525.5484326
-  },
-  {
-    "id": "1784711277806",
-    "title": "新对话",
-    "messages": [
+        "metadata": null,
+        "content": [
+          {
+            "text": "席爷爷，好的，我帮您记着要下雨吗如果下雨的话那我就不出——那您想让我什么时候提醒您呢？",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "user",
+        "metadata": null,
+        "content": [
+          {
+            "text": "你在说什么呀你自己看看你说的那句话通顺吗",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
       {
         "role": "assistant",
-        "content": "您好奶奶！我是小忆，很高兴能陪伴您～"
+        "metadata": null,
+        "content": [
+          {
+            "text": "好席爷爷，那这次先不设了。想提醒的时候随时跟我说“X分钟后提醒我XX”就行。",
+            "type": "text"
+          }
+        ],
+        "options": null
+      },
+      {
+        "role": "assistant",
+        "content": "席爷爷，看您安静好一会儿啦，是不是心里有点闷闷的？要不我陪您唠唠，说说今天遇到啥好玩的事儿？"
       }
     ],
-    "created": 1784711277.8070183,
-    "updated": 1784711277.8070183
+    "created": 1792583073.6023216,
+    "updated": 1792584761.2825973,
+    "summary": "",
+    "summary_until_index": 0,
+    "last_summarized_ts": 0.0
   }
 ]
