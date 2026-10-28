@@ -903,16 +903,53 @@ WEATHER_CITY = _load_secret("WEATHER_CITY")   # 可选：城市名（如"北京"
 
 _weather_cache = {"ts": 0.0, "data": None, "city": ""}
 
+# 公网 IP 定位缓存（IP 基本不变，6 小时内复用，减少对外请求）
+_weather_loc = {"city": "", "lat": None, "lon": None, "ts": 0.0}
+_locate_warned = False
+_located_logged = False   # 定位成功后打一次确认日志
+# 英文城市 → 中文（仅用于消息展示；查不到的城市用原名，不影响定位与天气）
+_CITY_ZH = {
+    "changsha": "长沙", "beijing": "北京", "shanghai": "上海", "guangzhou": "广州",
+    "shenzhen": "深圳", "hangzhou": "杭州", "chengdu": "成都", "wuhan": "武汉",
+    "xian": "西安", "xi'an": "西安", "nanjing": "南京", "tianjin": "天津",
+    "chongqing": "重庆", "suzhou": "苏州", "qingdao": "青岛", "dalian": "大连",
+    "ningbo": "宁波", "xiamen": "厦门", "changchun": "长春", "shenyang": "沈阳",
+}
+
 def _detect_city():
-    """公网 IP → 城市名（ip-api.com 免费接口）；失败返回空串"""
-    try:
-        r = http_session.get("http://ip-api.com/json/?language=zh-CN", timeout=5)
-        d = r.json()
-        if d.get("status") == "success":
-            return (d.get("city") or "").strip()
-    except Exception as e:
-        print(f"城市自动定位失败: {e}")
-    return ""
+    """公网 IP → (城市, lat, lon)。主 ipwho.is、备 ipinfo.io（ip-api.com 已弃用：本机不可达）。
+    结果缓存 6 小时；全部失败返回 None，且只打一次日志（不刷屏）。"""
+    global _locate_warned
+    if time.time() - _weather_loc["ts"] < 6 * 3600 and _weather_loc["city"]:
+        return _weather_loc["city"], _weather_loc["lat"], _weather_loc["lon"]
+    try:  # ① ipwho.is（免费无 key，返回 city/latitude/longitude）
+        d = http_session.get("https://ipwho.is/", timeout=6).json()
+        if d.get("success") and d.get("city") and d.get("latitude") is not None:
+            info = (str(d["city"]).strip(), float(d["latitude"]), float(d["longitude"]))
+            _weather_loc.update({"city": info[0], "lat": info[1], "lon": info[2], "ts": time.time()})
+            return info
+    except Exception:
+        pass
+    try:  # ② ipinfo.io（免费版，loc="lat,lon"）
+        d = http_session.get("https://ipinfo.io/json", timeout=6).json()
+        loc = d.get("loc") or ""
+        if d.get("city") and "," in loc:
+            lat_s, lon_s = loc.split(",")[:2]
+            info = (str(d["city"]).strip(), float(lat_s), float(lon_s))
+            _weather_loc.update({"city": info[0], "lat": info[1], "lon": info[2], "ts": time.time()})
+            return info
+    except Exception:
+        pass
+    if not _locate_warned:
+        print("⚠️ 城市自动定位失败（ipwho.is / ipinfo.io 均不可达），天气暂缓，1 小时后自动重试")
+        _locate_warned = True
+    return None
+
+def _city_display(name):
+    """城市名转中文展示：英文城市名查映射，命中用中文，否则用原名"""
+    if not name:
+        return name
+    return _CITY_ZH.get(str(name).strip().lower(), name)
 
 def _open_meteo_geocode(city):
     """城市名 → (lat, lon)；失败返回 None"""
@@ -931,33 +968,45 @@ _WEATHER_CODES_SNOW = {71, 73, 75, 77, 85, 86}   # Open-Meteo 天气代码：雪
 
 def _weather_refresh_loop():
     """后台线程：每小时拉一次天气，检测 降温≥5℃ / 降雨 / 降雪"""
+    global _located_logged
     while True:
         try:
-            city = WEATHER_CITY or _detect_city()
+            # 优先手动指定城市（WEATHER_CITY），否则按公网 IP 自动定位（直接拿城市+经纬度）
+            if WEATHER_CITY:
+                city, loc = WEATHER_CITY, _open_meteo_geocode(WEATHER_CITY)
+            else:
+                located = _detect_city()
+                if not located:
+                    time.sleep(3600)
+                    continue
+                city, lat, lon = located
+                loc = (lat, lon)
+                if not _located_logged:
+                    print(f"📍 天气自动定位: {_city_display(city)}（{lat:.2f}, {lon:.2f}）")
+                    _located_logged = True
             data = None
-            if city:
-                loc = _open_meteo_geocode(city)
-                if loc:
-                    r = http_session.get("https://api.open-meteo.com/v1/forecast",
-                                         params={"latitude": loc[0], "longitude": loc[1],
-                                                 "past_days": 1, "forecast_days": 1,
-                                                 "daily": "temperature_2m_min,precipitation_sum,weathercode",
-                                                 "timezone": "Asia/Shanghai"},
-                                         timeout=10)
-                    d = (r.json() or {}).get("daily") or {}
-                    if d.get("time") and len(d["time"]) >= 2:
-                        # past_days=1：索引0=昨天，索引1=今天
-                        tmin_y, tmin_t = d["temperature_2m_min"][0], d["temperature_2m_min"][1]
-                        rain = (d["precipitation_sum"][1] or 0) >= 1.0
-                        snow = d["weathercode"][1] in _WEATHER_CODES_SNOW
-                        drop = (tmin_y - tmin_t) if (tmin_y is not None and tmin_t is not None) else 0
-                        if snow:
-                            data = {"kind": "snow", "desc": f"{city}今天可能要下雪，出门注意路滑"}
-                        elif rain:
-                            data = {"kind": "rain", "desc": f"{city}今天可能要下雨，出门记得带伞"}
-                        elif drop >= 5:
-                            data = {"kind": "cold",
-                                    "desc": f"{city}今儿降温约{int(drop)}度，最低{int(tmin_t)}度"}
+            if loc:
+                r = http_session.get("https://api.open-meteo.com/v1/forecast",
+                                     params={"latitude": loc[0], "longitude": loc[1],
+                                             "past_days": 1, "forecast_days": 1,
+                                             "daily": "temperature_2m_min,precipitation_sum,weathercode",
+                                             "timezone": "Asia/Shanghai"},
+                                     timeout=10)
+                d = (r.json() or {}).get("daily") or {}
+                if d.get("time") and len(d["time"]) >= 2:
+                    # past_days=1：索引0=昨天，索引1=今天
+                    tmin_y, tmin_t = d["temperature_2m_min"][0], d["temperature_2m_min"][1]
+                    rain = (d["precipitation_sum"][1] or 0) >= 1.0
+                    snow = d["weathercode"][1] in _WEATHER_CODES_SNOW
+                    drop = (tmin_y - tmin_t) if (tmin_y is not None and tmin_t is not None) else 0
+                    cname = _city_display(city)
+                    if snow:
+                        data = {"kind": "snow", "desc": f"{cname}今天可能要下雪，出门注意路滑"}
+                    elif rain:
+                        data = {"kind": "rain", "desc": f"{cname}今天可能要下雨，出门记得带伞"}
+                    elif drop >= 5:
+                        data = {"kind": "cold",
+                                "desc": f"{cname}今儿降温约{int(drop)}度，最低{int(tmin_t)}度"}
             _weather_cache.update({"ts": time.time(), "data": data, "city": city})
             if data:
                 print(f"🌦️ 天气信号: {data['desc']}")
