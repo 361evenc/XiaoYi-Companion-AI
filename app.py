@@ -236,6 +236,121 @@ async () => {
 }
 """
 
+# 微信式底部图标栏的回传脚本：
+# FILE_JS：点「🖼️」弹出文件选择框，选图后以 dataURL(base64) 写回隐藏通道，触发后端"收到照片啦"。
+# CAMERA_JS：点「📷」开摄像头（浮层实时预览），再点一次抓帧拍照，同样写回隐藏通道。
+FILE_JS = """
+async () => {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = 'image/*';
+  input.style.display = 'none';
+  document.body.appendChild(input);
+  return new Promise((resolve) => {
+    input.oncancel = () => { try { document.body.removeChild(input); } catch (e) {} resolve(["", ""]); };
+    input.onchange = () => {
+      const file = input.files && input.files[0];
+      try { document.body.removeChild(input); } catch (e) {}
+      if (!file) { resolve(["", ""]); return; }
+      const r = new FileReader();
+      r.onload = () => resolve(["", r.result]);
+      r.readAsDataURL(file);
+    };
+    input.click();
+  });
+}
+"""
+
+CAMERA_JS = """
+async () => {
+  // 浮层里「拍照」「关闭」原生按钮调用的全局函数
+  window.__xyCap = () => {
+    let b64 = "";
+    try {
+      const v = document.getElementById('xy-cam-video');
+      const cv = document.createElement('canvas');
+      cv.width = v.videoWidth || 640; cv.height = v.videoHeight || 480;
+      cv.getContext('2d').drawImage(v, 0, 0, cv.width, cv.height);
+      b64 = cv.toDataURL('image/jpeg', 0.92);
+    } catch (e) {}
+    window.__xyCam = window.__xyCam || { open: true, pendingB64: '', stream: null };
+    window.__xyCam.pendingB64 = b64;
+    // 交给工具栏「📷」按钮的 Gradio 事件，把 base64 回传后端（与再点一次图标同一条链路）
+    const b = document.getElementById('xy-cam-trigger');
+    if (b) b.click();
+  };
+  window.__xyClose = () => {
+    try { if (window.__xyCam && window.__xyCam.stream) window.__xyCam.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+    const ov = document.getElementById('xy-cam-overlay');
+    if (ov) { ov.style.display = 'none'; ov.innerHTML = ''; }
+    if (window.__xyCam) { window.__xyCam.open = false; window.__xyCam.pendingB64 = ''; }
+  };
+  // 相机已开 -> 拍照（优先用浮层「📸拍照」预抓的帧；或再点一次工具栏图标拍照）
+  if (window.__xyCam && window.__xyCam.open) {
+    let b64 = "";
+    if (window.__xyCam.pendingB64) {
+      b64 = window.__xyCam.pendingB64;
+    } else {
+      try {
+        const v = document.getElementById('xy-cam-video');
+        const cv = document.createElement('canvas');
+        cv.width = v.videoWidth || 640; cv.height = v.videoHeight || 480;
+        cv.getContext('2d').drawImage(v, 0, 0, cv.width, cv.height);
+        b64 = cv.toDataURL('image/jpeg', 0.92);
+      } catch (e) {}
+    }
+    window.__xyClose();
+    return ["", b64];
+  }
+  // 开相机：浮层放视频 + 「📸拍照」「✕关闭」两个按钮
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ video: true }); }
+  catch (e) { return ["❌ 无法打开摄像头，请检查浏览器权限", ""]; }
+  window.__xyCam = { open: true, pendingB64: '', stream: stream };
+  const ov = document.getElementById('xy-cam-overlay');
+  if (ov) {
+    ov.innerHTML = '<video id="xy-cam-video" autoplay playsinline muted></video>' +
+      '<div class="cam-btns">' +
+        '<button class="cam-btn" onclick="window.__xyCap()">📸 拍照</button>' +
+        '<button class="cam-btn" onclick="window.__xyClose()">✕ 关闭</button>' +
+      '</div>';
+    ov.style.display = 'flex';
+    ov.querySelector('video').srcObject = stream;
+  }
+  return ["📷 相机已开启", ""];
+}
+"""
+
+# 把「↩️ 撤回」按钮动态注入到最后一条用户消息下面（Gradio 会话气泡不支持内嵌按钮，
+# 只能用 JS 注入；点击它再触发隐藏的 xy-recall-trigger 按钮走 Gradio 撤回事件链）。
+RECALL_INJECT_JS = """
+(function(){
+  var INJ = 'xy-recall-injected';
+  function inject(){
+    try{
+      // 每次先清理旧注入按钮，避免重复
+      document.querySelectorAll('.' + INJ).forEach(function(el){ el.remove(); });
+      // 收集可能的"用户消息气泡"节点，取最后一个可见且有内容的
+      var cands = document.querySelectorAll('.message.user, [class*="user-message"], [class*="role-user"]');
+      var last = null;
+      for (var i = cands.length - 1; i >= 0; i--){
+        var c = cands[i];
+        if (c.offsetParent !== null && (c.textContent || '').trim()){ last = c; break; }
+      }
+      if (!last) return;
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = INJ;
+      btn.textContent = '↩️ 撤回';
+      btn.onclick = function(){ var t = document.getElementById('xy-recall-trigger'); if (t) t.click(); };
+      last.appendChild(btn);
+    } catch (e) {}
+  }
+  document.addEventListener('DOMContentLoaded', inject);
+  setInterval(inject, 700);   // 轮询注入：消息增删后再挂上，简单可靠
+})();
+"""
+
 # ========== 文件路径 ==========
 HISTORY_FILE = "conversations.json"
 BACKUP_DIR = "backups"
@@ -1732,7 +1847,7 @@ def poll_reminder_events(chat, is_muted, conv_id):
     """轮询调度队列：把到点的提醒推进聊天窗，播放提示音/语音，刷新提醒与记忆面板"""
     if not reminder_queue:
         # 空转时也顺带刷新记忆面板（后台记忆抽取是异步的，面板靠这里追平）
-        return gr.update(), gr.update(), gr.update(), gr.update(value=get_memory_panel_html())
+        return gr.update(), gr.update(), gr.update(), gr.update(value=get_memory_panel_html()), render_sidebar_cards()
     fired = []
     while reminder_queue:
         fired.append(reminder_queue.popleft())
@@ -1742,13 +1857,55 @@ def poll_reminder_events(chat, is_muted, conv_id):
         chat = chat + [{"role": "assistant", "content": item["message"]}]
     save_conversation(conv_id, chat)
     audio = build_reminder_audio(fired[-1]["message"], is_muted)
-    return chat, audio, gr.update(value=get_reminders_panel_html()), gr.update(value=get_memory_panel_html())
+    return chat, audio, gr.update(value=get_reminders_panel_html()), gr.update(value=get_memory_panel_html()), render_sidebar_cards()
+
+# ========== 提醒面板按钮：完成/取消不靠"会说话"，点一下就管理 ==========
+# 隐藏回传通道：HTML 按钮把 "动作|提醒id" 写入隐藏文本框，触发 change 走同一条后端逻辑
+REMINDER_ACTION_EL_ID = "reminder-action-input"
+
+def _reminder_action_js(verb, rid):
+    """生成按钮 onclick 的 JS：把 verb|rid 写入隐藏文本框并派发 input 事件。
+    verb 仅 "done"/"cancel"，rid 为系统生成的字母数字 id，均无用户输入、无注入风险。"""
+    return (
+        "var e=document.getElementById('" + REMINDER_ACTION_EL_ID + "');"
+        "if(e){var t=(e.tagName==='TEXTAREA'||e.tagName==='INPUT')?e"
+        ":(e.querySelector('textarea')||e.querySelector('input'));"
+        "if(t){var p=t.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;"
+        "var s=Object.getOwnPropertyDescriptor(p,'value').set;"
+        "s.call(t,'" + verb + "|" + rid + "');"
+        "t.dispatchEvent(new Event('input',{bubbles:true}));}}return false;"
+    )
+
+def _reminder_button(verb, rid, label, bg):
+    """48px 以上的大按钮，老人点起来不吃力；颜色按动作区分（完成绿/取消红）。"""
+    js = _reminder_action_js(verb, rid)
+    return (f"<button type='button' onclick=\"{js}\" "
+            f"style='min-width:76px;height:48px;padding:0 16px;border:none;"
+            f"border-radius:12px;background:{bg};color:#fff;font-size:17px;"
+            f"font-weight:bold;cursor:pointer;margin-left:10px;"
+            f"-webkit-tap-highlight-color:transparent;'>{label}</button>")
 
 def get_reminders_panel_html():
     now = time.time()
     now_dt = datetime.fromtimestamp(now)
     rows = []
+    awaiting = reminder_store.awaiting_confirm(now, CONFIRM_WINDOW)
+    awaiting_ids = {r["id"] for r in awaiting}
+
+    # ① 已到点、正在被反复补催的提醒 → 「✅ 完成」，与语音"喝了/办好了"同一条 confirm 逻辑
+    for r in awaiting:
+        desc = describe_reminder(r, now_dt)
+        rows.append(f"""
+        <div style="padding:8px 10px;border-left:3px solid #4CAF50;margin-bottom:6px;font-size:16px;background:#F1F8E9;border-radius:8px;display:flex;align-items:center;justify-content:space-between;">
+            <div style="flex:1;min-width:0;">🔔 {desc}<span style="color:#C62828;font-size:13px;margin-left:6px;">（等您确认）</span></div>
+            {_reminder_button("done", r["id"], "✅ 完成", "#4CAF50")}
+        </div>""")
+
+    # ② 未到点的待办提醒 → 「✖ 取消」，与语音"取消提醒"同一条 cancel 逻辑
+    #    排除已在上面"等确认"的周期提醒，避免一条提醒显示两次
     for r in reminder_store.pending(now)[:8]:
+        if r["id"] in awaiting_ids:
+            continue
         desc = describe_reminder(r, now_dt)
         if r.get("repeat"):
             extra = f"🔁 {repeat_desc(r['repeat'])}"
@@ -1758,10 +1915,11 @@ def get_reminders_panel_html():
                 f"{delta // 60}分钟后" if delta < 3600
                 else f"{delta // 3600}小时{(delta % 3600) // 60}分后")
         rows.append(f"""
-        <div style="padding:4px 0 4px 16px;position:relative;border-left:2px solid #FFB74D;margin-bottom:2px;font-size:15px;">
-            <span style="position:absolute;left:-5px;top:9px;width:8px;height:8px;border-radius:50%;background:#FFB74D;"></span>
-            ⏰ {desc}<span style="color:#aaa;font-size:12px;margin-left:6px;">{extra}</span>
+        <div style="padding:8px 10px;border-left:3px solid #FFB74D;margin-bottom:6px;font-size:16px;background:#FFF3E0;border-radius:8px;display:flex;align-items:center;justify-content:space-between;">
+            <div style="flex:1;min-width:0;">⏰ {desc}<span style="color:#aaa;font-size:13px;margin-left:6px;">{extra}</span></div>
+            {_reminder_button("cancel", r["id"], "✖ 取消", "#EF5350")}
         </div>""")
+
     stats = reminder_store.stats(now)
     stats_line = ""
     if stats["total"]:
@@ -1778,6 +1936,91 @@ def get_reminders_panel_html():
         return "<div style='color:#8B5E34;padding:8px;text-align:center;'>暂无提醒，可以说“五分钟后提醒我喝水”</div>"
     return "".join(rows) + stats_line + notices
 
+# ========== 左侧栏瘦身（反馈6）：左栏只留入口卡片 ==========
+# 3 张导航卡（记忆箱/历史对话/隐私设置）点开进二级页；提醒事项放最下面，点一下在左栏就地展开。
+# 卡片 onclick 通过 programmatic-click 触发隐藏的 Gradio 按钮（与撤回按钮同一套机制）。
+_reminder_drawer_open = False   # 记录提醒列表当前是否展开，供卡片箭头随刷新保持一致
+
+def render_reminder_card_html():
+    """提醒事项卡片（左下角，可展开/收起）。"""
+    try:
+        n = len(reminder_store.pending(time.time()))
+    except Exception:
+        n = 0
+    arrow = "▴" if _reminder_drawer_open else "▾"
+    sub = (f"今天还有 {n} 件 · 点我展开" if n else f"暂无待办 · 点我展开")
+    return (f'<div class="xy-card" onclick="var t=document.getElementById(\'xy-nav-reminder-trigger\');'
+            f'if(t) t.click();">'
+            f'<span class="pc-icon">⏰</span>'
+            f'<span class="pc-txt"><span class="pc-title">提醒事项</span>'
+            f'<span class="pc-sub">{sub}</span></span>'
+            f'<span class="pc-arrow">{arrow}</span></div>')
+
+def render_sidebar_cards():
+    """生成左栏卡片 HTML：3 张导航卡片 + 底部可展开的提醒卡片（含实时计数）。"""
+    try:
+        st = memory_bank.stats()
+        mem_n = (st or {}).get("facts", 0) + (st or {}).get("episodes", 0)
+    except Exception:
+        mem_n = 0
+    try:
+        convs = load_all_conversations() or []
+        conv_n = len(convs)
+    except Exception:
+        conv_n = 0
+
+    def _nav_card(key, icon, title, sub):
+        trig = {"memory": "xy-nav-memory-trigger",
+                "history": "xy-nav-history-trigger",
+                "privacy": "xy-nav-privacy-trigger"}[key]
+        return (f'<div class="xy-card" onclick="var t=document.getElementById(\'{trig}\');'
+                f'if(t) t.click();">'
+                f'<span class="pc-icon">{icon}</span>'
+                f'<span class="pc-txt"><span class="pc-title">{title}</span>'
+                f'<span class="pc-sub">{sub}</span></span>'
+                f'<span class="pc-arrow">›</span></div>')
+
+    mem_sub = (f"存了 {mem_n} 件事" if mem_n else "点开看看记住了什么")
+    his_sub = (f"共 {conv_n} 段对话" if conv_n else "还没有对话记录")
+    pri_sub = "管理忘掉的事"
+    return "".join([
+        _nav_card("memory", "🧠", "记忆箱", mem_sub),
+        _nav_card("history", "💬", "历史对话", his_sub),
+        _nav_card("privacy", "🔒", "隐私设置", pri_sub),
+        render_reminder_card_html(),
+    ])
+
+def toggle_reminder_drawer():
+    """点提醒卡片 → 就地展开/收起左栏提醒列表。"""
+    global _reminder_drawer_open
+    _reminder_drawer_open = not _reminder_drawer_open
+    return (gr.update(visible=_reminder_drawer_open),
+            render_sidebar_cards(),
+            get_reminders_panel_html())
+
+def _navigate_page(page):
+    """切页：page="" 回主界面；否则切到对应二级页（记忆箱/历史/隐私）。"""
+    return (
+        gr.update(visible=(page == "")),       # main_row（左栏卡片 + 聊天）
+        gr.update(visible=(page == "memory")),   # page_memory
+        gr.update(visible=(page == "history")),  # page_history
+        gr.update(visible=(page == "privacy")),  # page_privacy
+    )
+
+def handle_reminder_action(action):
+    """提醒面板按钮回传：'done|rid' 或 'cancel|rid'。
+    与语音意图走同一条后端逻辑：done -> reminder_store.confirm；cancel -> reminder_store.cancel。
+    操作后重新渲染面板，条目即刻消失。"""
+    try:
+        verb, rid = str(action or "").split("|", 1)
+    except ValueError:
+        return get_reminders_panel_html(), render_sidebar_cards()
+    if verb == "done":
+        reminder_store.confirm(rid, time.time())
+    elif verb == "cancel":
+        reminder_store.cancel(rid)
+    return get_reminders_panel_html(), render_sidebar_cards()
+
 # 启动调度线程（daemon：随主进程退出）
 Thread(target=reminder_worker, daemon=True).start()
 
@@ -1789,11 +2032,20 @@ custom_css = """
     .top-bar { background-color: #F5E5CC !important; padding: 14px 20px !important; border-radius: 0 0 20px 20px !important; display: flex !important; justify-content: space-between !important; align-items: center !important; font-size: 22px !important; font-weight: bold !important; color: #2D1B0E !important; margin-bottom: 10px !important; }
     .status-online { display: flex !important; align-items: center !important; gap: 8px !important; font-size: 20px !important; }
     .green-dot { width: 14px !important; height: 14px !important; background-color: #52c41a !important; border-radius: 50% !important; }
-    .input-area { background-color: #F5E5CC !important; padding: 16px !important; border-radius: 20px 20px 0 0 !important; margin-top: 10px !important; display: flex !important; align-items: center !important; gap: 6px !important; }
-    .chat-input { flex: 1 !important; }
-    .chat-input textarea { border-radius: 30px !important; padding: 14px 24px !important; font-size: 20px !important; background: #fff !important; border: 1px solid #ddd !important; min-height: 76px !important; }
-    .big-btn { height: 52px !important; font-size: 20px !important; border-radius: 30px !important; background: #E3B87C !important; color: #2D1B0E !important; font-weight: bold !important; border: none !important; outline: none !important; box-shadow: none !important; min-width: 60px !important; }
-    .big-btn:focus, .big-btn:active { outline: none !important; box-shadow: none !important; }
+    /* 微信式输入卡片：输入框在上，工具栏+发送在下一行（简单大气，反馈3，暖色适老） */
+    .wx-input-card { background: #F7EBD8 !important; border: 1px solid #E6D3B3 !important; border-radius: 20px 20px 12px 12px !important; padding: 14px 14px 12px !important; margin-top: 10px !important; }
+    .wx-input-card .chat-input textarea { width: 100% !important; border-radius: 16px !important; padding: 13px 18px !important; font-size: 18px !important; line-height: 1.5 !important; background: #ffffff !important; border: 1.5px solid #E4D2B4 !important; min-height: 68px !important; color: #2D1B0E !important; outline: none !important; box-shadow: none !important; caret-color: #C88A52 !important; }
+    .wx-input-card .chat-input textarea:focus { border-color: #C88A52 !important; }
+    .wx-input-bar { display: flex !important; align-items: center !important; gap: 10px !important; margin-top: 10px !important; }
+    .wx-grow { flex: 1 !important; }
+    .wx-input-bar .media-ic button { min-width: 52px !important; min-height: 48px !important; font-size: 22px !important; border-radius: 12px !important; background: #C19A6B !important; color: #4A3218 !important; border: none !important; outline: none !important; box-shadow: none !important; transition: transform .12s ease, background .12s ease !important; }
+    .wx-input-bar .mic-btn button { background: #C19A6B !important; }  /* 3 个图标统一：卡其/浅棕矩形板 */
+    .wx-chip, .wx-send { height: 48px !important; border-radius: 24px !important; font-size: 18px !important; font-weight: bold !important; border: none !important; outline: none !important; box-shadow: none !important; cursor: pointer !important; padding: 0 18px !important; }
+    .wx-chip { background: #F3E2C6 !important; color: #5B3A18 !important; }
+    .wx-send { background: #D99A4E !important; color: #2D1B0E !important; min-width: 96px !important; }
+    .wx-chip:hover, .wx-send:hover { box-shadow: 0 2px 8px rgba(0,0,0,.14) !important; transform: translateY(-1px) !important; }
+    .wx-chip:active, .wx-send:active { box-shadow: none !important; transform: translateY(1px) !important; }
+    .wx-input-bar .media-ic button:active { transform: scale(.94) !important; }
     .quick-btn { height: 48px !important; font-size: 18px !important; border-radius: 25px !important; background: #ffffff !important; color: #2D1B0E !important; border: 1px solid #D4A86A !important; margin: 0 4px !important; flex: 1 !important; cursor: pointer !important; }
     .quick-btn:hover { background-color: #F5E5CC !important; border-color: #C88A52 !important; }
     .footer-tip { text-align: center !important; color: #8B5E34 !important; font-size: 16px !important; padding: 10px !important; }
@@ -1827,13 +2079,12 @@ custom_css = """
     .history-sidebar { background-color: #F9F2E6 !important; border-radius: 16px !important; padding: 12px !important; margin: 10px !important; height: 85% !important; overflow-y: auto !important; }
     .history-title { font-size: 20px !important; font-weight: bold !important; margin-bottom: 12px !important; text-align: center !important; color: #2D1B0E !important; }
     .event-box { background: #fff; border-radius: 12px; padding: 12px; margin-top: 10px; font-size: 16px; color: #2D1B0E; max-height: 250px; overflow-y: auto; }
-    /* ===== 麦克风按钮 ===== */
     .mic-btn {
         min-width: 52px !important;
         width: 52px !important;
         height: 52px !important;
-        border-radius: 50% !important;
-        background: #E3B87C !important;
+        border-radius: 10px !important;
+        background: #C19A6B !important;
         border: none !important;
         outline: none !important;
         box-shadow: none !important;
@@ -1872,6 +2123,35 @@ custom_css = """
     .top-bar { animation: xiaoyi-fade-in 0.4s ease; }
     .big-btn, .quick-btn { transition: transform 0.15s ease, background 0.15s ease !important; }
     .big-btn:hover, .quick-btn:hover { transform: translateY(-1px); }
+    .reminder-action-hidden { display: none !important; }
+    /* 微信式底部图标栏：麦克风 / 图片 / 摄像机 */
+    .media-ic button { min-width: 52px !important; min-height: 48px !important; font-size: 22px !important; border-radius: 10px !important; background: #C19A6B !important; color: #4A3218 !important; border: none !important; outline: none !important; box-shadow: none !important; } .toolbar-icons { display: none !important; }
+    /* 隐藏的图片/相机回传通道 */
+    .photo-channel-hidden { display: none !important; }
+    /* 相机实时预览浮层 */
+    .cam-overlay { position: fixed; left: 0; top: 0; right: 0; bottom: 0; z-index: 999; background: rgba(0,0,0,0.65); flex-direction: column; align-items: center; justify-content: center; }
+    .cam-overlay video { width: min(90vw, 640px) !important; max-height: 68vh; border-radius: 12px; background: #000; }
+    .cam-btns { display: flex; gap: 18px; margin-top: 18px; }
+    .cam-btn { min-width: 112px !important; min-height: 52px !important; font-size: 18px !important; border-radius: 26px !important; border: none !important; cursor: pointer !important; background: #fff !important; color: #333 !important; }
+    /* 消息撤回按钮（注入到最后一条用户消息下方）：≥48px，常显不用悬停 */
+    .xy-recall-injected { display: block !important; margin: 8px 0 4px 0 !important; min-width: 100px !important; min-height: 48px !important; font-size: 16px !important; border-radius: 16px !important; border: none !important; cursor: pointer !important; background: #fff !important; color: #e03131 !important; }
+    .cam-hint { color: #fff; font-size: 18px; margin-top: 14px; text-align: center; padding: 0 16px; }
+    /* ===== 左侧栏瘦身（反馈6）：4张入口卡片 ===== */
+    .sidebar-title { font-size: 20px !important; font-weight: bold !important; text-align: center !important; margin-bottom: 10px !important; color: #2D1B0E !important; }
+    .sidebar-cards { background: #F9F2E6 !important; border-radius: 16px !important; padding: 12px !important; margin: 6px !important; display: flex !important; flex-direction: column !important; gap: 12px !important; }
+    .xy-card { display: flex !important; align-items: center !important; gap: 10px !important; background: #ffffff !important; border: 1px solid #E0D3C0 !important; border-radius: 14px !important; padding: 14px 12px !important; cursor: pointer !important; min-height: 60px !important; box-shadow: 0 1px 3px rgba(0,0,0,0.06) !important; transition: all 0.15s ease !important; }
+    .xy-card:hover { background: #F5E5CC !important; border-color: #C88A52 !important; transform: translateY(-1px) !important; }
+    .xy-card:active { transform: scale(0.97) !important; }
+    .pc-icon { font-size: 26px !important; line-height: 1 !important; flex-shrink: 0 !important; }
+    .pc-txt { display: flex !important; flex-direction: column !important; flex: 1 !important; min-width: 0 !important; }
+    .pc-title { font-size: 18px !important; font-weight: bold !important; color: #2D1B0E !important; }
+    .pc-sub { font-size: 13px !important; color: #8B5E34 !important; margin-top: 2px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+    .pc-arrow { font-size: 24px !important; color: #C88A52 !important; flex-shrink: 0 !important; }
+    /* ===== 二级页（记忆箱/提醒/历史/隐私） ===== */
+    .subpage { background: #F9F2E6 !important; border-radius: 16px !important; padding: 16px 20px !important; margin: 10px !important; min-height: 70vh !important; }
+    .subpage-head { display: flex !important; align-items: center !important; gap: 14px !important; margin-bottom: 16px !important; }
+    .subpage-back { min-width: 96px !important; min-height: 48px !important; font-size: 18px !important; font-weight: bold !important; border: none !important; border-radius: 14px !important; background: #E3B87C !important; color: #2D1B0E !important; cursor: pointer !important; box-shadow: none !important; }
+    .subpage-title { font-size: 22px !important; font-weight: bold !important; color: #2D1B0E !important; }
 """
 
 # ========== 全局变量 ==========
@@ -2242,57 +2522,25 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
 
     # 主界面
     with gr.Column(visible=False) as main_view:
-        with gr.Row():
+        with gr.Row() as main_row:
             with gr.Column(scale=1, min_width=240):
-                gr.HTML('<div class="history-sidebar">')
-                gr.Markdown("📚 **记忆箱**")
-                box_btn = gr.Button("打开记忆箱", size="sm", variant="secondary")
-                with gr.Column(visible=False) as box_view:
-                    box_flow_html = gr.HTML("")
-                    gr.Markdown("⭐ **重要事件**")
-                    box_events = gr.HTML("")
-                    gr.Markdown("📝 **总结**")
-                    box_summary = gr.HTML("")
-                    gr.Markdown("👤 **画像概述**")
-                    box_profile = gr.HTML("")
-                    gr.Markdown("📷 **照片**")
-                    box_gallery = gr.Gallery(value=list_photos(), columns=2, height=170,
-                                             object_fit="cover", show_label=False)
-                    with gr.Row():
-                        box_drop = gr.Dropdown(choices=[], label="忘掉这件事", scale=3,
-                                               interactive=True, allow_custom_value=False)
-                        box_forget_btn = gr.Button("🚫", size="sm", scale=1, variant="stop")
-                    box_msg = gr.Markdown("")
-                    box_hide = gr.Button("收起", size="sm", variant="ghost")
-                # 搜索框
-                search_input = gr.Textbox(placeholder="🔍 搜索对话...", show_label=False, container=False)
-                # 对话列表
-                history_dropdown = gr.Dropdown(choices=get_conversation_list_display(), label="历史对话", interactive=True, allow_custom_value=False)
-                with gr.Row():
-                    delete_btn = gr.Button("🗑️ 删除", variant="stop", size="sm")
-                    new_conv_btn = gr.Button("➕ 新对话", variant="secondary", size="sm")
-                # 记忆（事件流→记忆库；画像已改为后台导出 用户画像.txt，任务3）
-                gr.Markdown("🧠 **记忆**")
-                events_display = gr.HTML(value=get_memory_panel_html(), elem_classes="event-box")
-                # 提醒事项
-                gr.Markdown("⏰ **提醒事项**")
-                reminders_display = gr.HTML(value=get_reminders_panel_html(), elem_classes="event-box")
-                # 任务9找回：心情曲线
-                gr.Markdown("📈 **心情曲线**")
-                emotion_btn = gr.Button("查看心情曲线", size="sm", variant="secondary")
-                emotion_img = gr.Image(label="", height=180, interactive=False,
-                                       elem_classes="event-box", show_label=False)
-                # 任务10找回：我的小传
-                gr.Markdown("📖 **我的小传**")
-                bio_btn = gr.Button("生成我的小传", size="sm", variant="secondary")
-                bio_out = gr.Markdown(elem_classes="event-box")
-                # 隐私设置：大白话说明数据存哪 + 一键删除所有记忆
-                gr.Markdown("🔒 **隐私设置**")
-                privacy_btn = gr.Button("打开隐私设置", size="sm", variant="secondary")
-                privacy_md = gr.Markdown(elem_classes="event-box")
-                privacy_del_btn = gr.Button("🗑️ 一键删除所有记忆", size="sm", variant="stop", visible=False)
-                privacy_audio = gr.Audio(autoplay=True, visible=False, show_label=False, elem_classes="audio-hidden")
-                gr.HTML('</div>')
+                gr.Markdown("📚 **我的小忆**", elem_classes="sidebar-title")
+                sidebar_cards = gr.HTML(value=render_sidebar_cards(), elem_classes="sidebar-cards")
+                # 提醒事项就地展开区（默认收起，点提醒卡片展开）
+                with gr.Column(visible=False) as reminder_drawer:
+                    gr.Markdown("**⏰ 待办提醒**")
+                    reminders_display = gr.HTML(value=get_reminders_panel_html(), elem_classes="event-box")
+                    # 隐藏回传通道：提醒面板的 完成/取消 按钮 onclick 把 "动作|提醒id" 写进来，触发 change 走后端
+                    reminder_action_input = gr.Textbox(visible=True, elem_id=REMINDER_ACTION_EL_ID,
+                                                       elem_classes="reminder-action-hidden",
+                                                       show_label=False, container=False)
+                # 隐藏导航触发器：卡片 onclick 触发对应按钮 → 切二级页（与撤回按钮同一套 programmatic-click 机制）
+                with gr.Row(visible=True, elem_classes="photo-channel-hidden"):
+                    nav_memory_trigger = gr.Button("go-memory", elem_id="xy-nav-memory-trigger")
+                    nav_reminder_trigger = gr.Button("go-reminder", elem_id="xy-nav-reminder-trigger")
+                    nav_history_trigger = gr.Button("go-history", elem_id="xy-nav-history-trigger")
+                    nav_privacy_trigger = gr.Button("go-privacy", elem_id="xy-nav-privacy-trigger")
+                    back_trigger = gr.Button("back", elem_id="xy-back-trigger")
             with gr.Column(scale=4):
                 gr.HTML('''<div class="top-bar"><div>🌸 小忆</div><div class="status-online"><div class="green-dot"></div> 陪伴中</div></div>''')
                 # 任务5补充：聊天中随时切换人格（同时切换音色），免刷新页面
@@ -2309,16 +2557,55 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
                     q2 = gr.Button("有点想你了", elem_classes="quick-btn")
                     q3 = gr.Button("身体有点不舒服", elem_classes="quick-btn")
                     q4 = gr.Button("讲讲以前的事", elem_classes="quick-btn")
-                with gr.Row(elem_classes="input-area"):
-                    mic_btn = gr.Button("🎙️", elem_classes="mic-btn")
-                    photo_btn = gr.Button("📷", elem_classes="mic-btn")
+                # 微信式输入卡片（简单大气，反馈3）：输入框在上，工具栏+发送在下一行
+                with gr.Column(elem_classes="wx-input-card"):
                     txt = gr.Textbox(placeholder="点这里跟小忆说话...", show_label=False, container=False, elem_classes="chat-input")
-                    send = gr.Button("📨 发送", elem_classes="big-btn")
-                    mute_btn = gr.Button("🔇 静音", elem_classes="big-btn")
+                    with gr.Row(elem_classes="wx-input-bar"):
+                        mic_btn = gr.Button("🎙️", elem_classes="media-ic mic-btn")   # 麦克风（强调）：点一下开始录音，再点一下发送
+                        img_btn = gr.Button("🖼️", elem_classes="media-ic")           # 图片：选一张发给小忆
+                        cam_btn = gr.Button("📷", elem_classes="media-ic", elem_id="xy-cam-trigger")  # 摄像机：现场拍照
+                        gr.HTML('<div class="wx-grow"></div>')                        # 占位，把静音/发送推到右侧
+                        mute_btn = gr.Button("🔇 静音", elem_classes="wx-chip")
+                        send = gr.Button("发送", elem_classes="wx-send")
+                # 撤回触发器：藏起来（display:none 但仍在 DOM），供"最后一条用户消息下的撤回按钮"programmatic-click
+                with gr.Row(visible=True, elem_classes="photo-channel-hidden"):
+                    recall_btn = gr.Button("↩️ 撤回", elem_id="xy-recall-trigger")
                 mic_input = gr.Textbox(visible=False, elem_id="mic-data", show_label=False)  # 录音数据回传通道（base64 WAV）
-                photo_file = gr.File(file_count="single", file_types=["image"], visible=False,
-                                     elem_id="photo-file", scale=0)  # 拍照/图片上传通道
+                media_status = gr.Textbox(visible=True, elem_classes="photo-channel-hidden", show_label=False)  # 媒体状态回传（隐藏）
+                imgcam_channel = gr.Textbox(visible=True, elem_classes="photo-channel-hidden", show_label=False)  # 图片/拍照 base64 回传通道
+                gr.HTML('<div id="xy-cam-overlay" class="cam-overlay" style="display:none"></div>')  # 相机实时预览浮层挂载点
                 gr.HTML('<div class="footer-tip">💖 小忆会记住你说过的每一句话</div>')
+
+        # ===== 二级页：记忆箱（记忆时间线 + 心情曲线；画像已隐藏仅存 txt，反馈11） =====
+        with gr.Column(visible=False, elem_classes="subpage") as page_memory:
+            gr.HTML('''<div class="subpage-head"><button type="button" class="subpage-back" onclick="var t=document.getElementById('xy-back-trigger'); if(t) t.click();">← 返回</button><span class="subpage-title">🧠 记忆箱</span></div>''')
+            gr.Markdown("**小忆记住了这些**")
+            events_display = gr.HTML(value=get_memory_panel_html(), elem_classes="event-box")
+            # 任务9找回：心情曲线
+            gr.Markdown("📈 **心情曲线**")
+            emotion_btn = gr.Button("查看心情曲线", size="sm", variant="secondary")
+            emotion_img = gr.Image(label="", height=180, interactive=False,
+                                   elem_classes="event-box", show_label=False)
+
+        # ===== 二级页：历史对话 =====
+        with gr.Column(visible=False, elem_classes="subpage") as page_history:
+            gr.HTML('''<div class="subpage-head"><button type="button" class="subpage-back" onclick="var t=document.getElementById('xy-back-trigger'); if(t) t.click();">← 返回</button><span class="subpage-title">💬 历史对话</span></div>''')
+            # 搜索框
+            search_input = gr.Textbox(placeholder="🔍 搜索对话...", show_label=False, container=False)
+            # 对话列表
+            history_dropdown = gr.Dropdown(choices=get_conversation_list_display(), label="历史对话", interactive=True, allow_custom_value=False)
+            with gr.Row():
+                delete_btn = gr.Button("🗑️ 删除", variant="stop", size="sm")
+                new_conv_btn = gr.Button("➕ 新对话", variant="secondary", size="sm")
+
+        # ===== 二级页：隐私设置 =====
+        with gr.Column(visible=False, elem_classes="subpage") as page_privacy:
+            gr.HTML('''<div class="subpage-head"><button type="button" class="subpage-back" onclick="var t=document.getElementById('xy-back-trigger'); if(t) t.click();">← 返回</button><span class="subpage-title">🔒 隐私设置</span></div>''')
+            gr.Markdown("小忆只在本机记住你说的内容，不会外传。随时可以忘掉不想留下的话。")
+            forget_input = gr.Textbox(placeholder="想忘掉哪件事？例如：我上周膝盖疼", label="把这件事忘掉",
+                                      show_label=False, container=False)
+            forget_btn = gr.Button("🗑️ 忘掉上面说的这件事", size="lg", variant="secondary")
+            forget_out = gr.Markdown(elem_classes="event-box")
 
     # 事件绑定
     def enter_chat(s, g, p, muted):
@@ -2338,10 +2625,10 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
             welcome_msg, voice_type=PERSONA_VOICE.get(UI_STATE["personality"]))
         global last_user_interaction_time
         last_user_interaction_time = time.time()
-        return True, surname_val, gender_val, p, gr.update(visible=False), gr.update(visible=True), chat_history, new_id, audio_path, gr.update(choices=get_conversation_list_display()), get_memory_panel_html(), get_reminders_panel_html(), gr.update(value=UI_STATE["personality"])
+        return True, surname_val, gender_val, p, gr.update(visible=False), gr.update(visible=True), chat_history, new_id, audio_path, gr.update(choices=get_conversation_list_display()), get_memory_panel_html(), get_reminders_panel_html(), render_sidebar_cards(), gr.update(value=UI_STATE["personality"])
 
     btn.click(enter_chat, [s_ipt, g_ipt, p_ipt, is_muted],
-              [ready, surname, gender, personality, setup_view, main_view, chat, current_conv_id, audio_output, history_dropdown, events_display, reminders_display, persona_switch])
+              [ready, surname, gender, personality, setup_view, main_view, chat, current_conv_id, audio_output, history_dropdown, events_display, reminders_display, sidebar_cards, persona_switch])
 
     # 任务5补充：聊天中切换人格 → 立即生效（下一句回复的提示词与音色同步切换）
     def switch_personality(p):
@@ -2349,35 +2636,130 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
         return UI_STATE["personality"]
     persona_switch.change(switch_personality, [persona_switch], [personality])
 
+    # 左侧栏卡片 → 二级页导航（记忆箱/历史/隐私；卡片 HTML onclick 触发下方隐藏按钮，按钮走这里）
+    _NAV_OUTS = [main_row, page_memory, page_history, page_privacy]
+    nav_memory_trigger.click(lambda: _navigate_page("memory"), None, _NAV_OUTS)
+    nav_reminder_trigger.click(toggle_reminder_drawer, None, [reminder_drawer, sidebar_cards, reminders_display])  # 提醒卡片：左栏就地展开
+    nav_history_trigger.click(lambda: _navigate_page("history"), None, _NAV_OUTS)
+    nav_privacy_trigger.click(lambda: _navigate_page("privacy"), None, _NAV_OUTS)
+    back_trigger.click(lambda: _navigate_page(""), None, _NAV_OUTS)
+
+    # 隐私页：「把这件事忘掉」→ 真删匹配的记忆（与聊天里说"忘了吧"同一条后端逻辑）
+    def do_forget(phrase):
+        events = list(user_memory.get("events", []))
+        kept, reply = ai_services.forget_by_request(
+            phrase, events, bank=memory_bank, call_name=user_memory.get("call_name", ""))
+        user_memory["events"] = kept
+        save_memory_events(kept)
+        if not reply:
+            reply = f"没找到和「{str(phrase).strip()}」相关的内容。您可以说得更具体一些。"
+        return reply, render_sidebar_cards(), get_memory_panel_html()
+    forget_btn.click(do_forget, [forget_input], [forget_out, sidebar_cards, events_display])
+
     # 文字/语音交互后刷新事件与提醒面板
     def refresh_panels(*args):
-        return get_memory_panel_html(), get_reminders_panel_html()
+        return get_memory_panel_html(), get_reminders_panel_html(), render_sidebar_cards()
+
+    # 提醒面板「完成/取消」按钮：onclick 写入隐藏文本框 → change 走后端同一条 intent 逻辑 → 刷新面板与左栏卡片
+    reminder_action_input.change(handle_reminder_action, [reminder_action_input], [reminders_display, sidebar_cards])
+
+    # 微信式图标栏后端：接住「🖼️选图 / 📷拍照」回传的 base64，落盘 + 反馈气泡 + 视觉识别钩子
+    def on_media_base64(b64, chat_history, conv_id):
+        if not b64:
+            return chat_history, None
+        try:
+            import base64 as _b64, time as _t, os as _os
+            header, _, payload = b64.partition(",")
+            mime = ""
+            if ";" in header:
+                mime = header[5:header.find(";")]
+            ext = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
+                   "image/gif": "gif"}.get(mime, "jpg")
+            raw = _b64.b64decode(payload)
+            _os.makedirs("uploads", exist_ok=True)
+            path = "uploads/photo_%d.%s" % (int(_t.time()), ext)
+            with open(path, "wb") as f:
+                f.write(raw)
+        except Exception:
+            return chat_history, None
+        # 视觉识别钩子（AI工程师④）：当前返回 None，只弹"收到照片啦"；接上后自动补充识别结果
+        vision_reply = ai_services.vision_recognize(path)
+        ack = "收到照片啦，我看看…"
+        if vision_reply:
+            ack += "\n" + vision_reply
+        hist = list(chat_history or [])
+        hist.append({"role": "assistant", "content": ack})
+        save_conversation(conv_id, hist)
+        return hist, None
+
+    # 隐藏的 base64 通道变化 -> 触发上述处理（🖼️ / 📷 共用同一条后端逻辑）
+    imgcam_channel.change(on_media_base64, [imgcam_channel, chat, current_conv_id],
+                          [chat, imgcam_channel])
+
+    # 🖼️ 选图：点击图标 -> 文件选择框 -> base64 写回通道 -> on_media_base64
+    img_btn.click(fn=None, outputs=[media_status, imgcam_channel], js=FILE_JS)
+    # 📷 拍照：点一次开摄像头（浮层实时预览），再点一次抓帧拍照 -> 写回通道
+    cam_btn.click(fn=None, outputs=[media_status, imgcam_channel], js=CAMERA_JS)
+
+    # 消息撤回：删掉最后一条用户消息（及其后紧跟的小忆回复），本期只做最后一条
+    def on_recall(chat_history, conv_id):
+        if not chat_history:
+            return chat_history
+        hist = list(chat_history)
+        # 从后往前找最后一条 user 消息
+        last_user_i = -1
+        for i in range(len(hist) - 1, -1, -1):
+            m = hist[i]
+            if isinstance(m, dict) and m.get("role") == "user":
+                last_user_i = i
+                break
+            if isinstance(m, (list, tuple)) and len(m) == 2 and m[0]:
+                last_user_i = i
+                break
+        if last_user_i < 0:
+            return chat_history
+        removed = hist[last_user_i]
+        # 若紧跟一条小忆回复，一并删除（仅删 assistant，避免误删下一条用户消息）
+        if last_user_i + 1 < len(hist):
+            nxt = hist[last_user_i + 1]
+            is_reply = (isinstance(nxt, dict) and nxt.get("role") == "assistant") or \
+                       (isinstance(nxt, (list, tuple)) and len(nxt) == 2 and nxt[1])
+            if is_reply:
+                del hist[last_user_i + 1]
+        del hist[last_user_i]
+        # AI工程师⑥ 撤回钩子：彻底清记忆/画像，让小忆"不记得、不再提"
+        ai_services.recall_message(conv_id, removed)
+        if conv_id:
+            save_conversation(conv_id, hist)
+        return hist
+
+    recall_btn.click(on_recall, [chat, current_conv_id], [chat])
 
     # 文字提交（语音播报放最后：文字先显示，再合成音频）
     txt.submit(chat_response, [txt, chat, surname, gender, is_muted, personality, current_conv_id, history_dropdown],
-               [txt, chat, audio_output, current_conv_id, history_dropdown]).then(refresh_panels, outputs=[events_display, reminders_display]).then(play_reply_audio, [chat, is_muted], [audio_output])
+               [txt, chat, audio_output, current_conv_id, history_dropdown]).then(refresh_panels, outputs=[events_display, reminders_display, sidebar_cards]).then(play_reply_audio, [chat, is_muted], [audio_output])
     send.click(chat_response, [txt, chat, surname, gender, is_muted, personality, current_conv_id, history_dropdown],
-               [txt, chat, audio_output, current_conv_id, history_dropdown]).then(refresh_panels, outputs=[events_display, reminders_display]).then(play_reply_audio, [chat, is_muted], [audio_output])
+               [txt, chat, audio_output, current_conv_id, history_dropdown]).then(refresh_panels, outputs=[events_display, reminders_display, sidebar_cards]).then(play_reply_audio, [chat, is_muted], [audio_output])
 
     # 快捷按钮
     for btn_q, q_text in [(q1, "我今天挺好的"), (q2, "有点想你了"), (q3, "身体有点不舒服"), (q4, "讲讲以前的事")]:
         btn_q.click(lambda t=q_text: t, None, txt).then(
             chat_response, [txt, chat, surname, gender, is_muted, personality, current_conv_id, history_dropdown],
             [txt, chat, audio_output, current_conv_id, history_dropdown]
-        ).then(refresh_panels, outputs=[events_display, reminders_display]).then(play_reply_audio, [chat, is_muted], [audio_output])
+        ).then(refresh_panels, outputs=[events_display, reminders_display, sidebar_cards]).then(play_reply_audio, [chat, is_muted], [audio_output])
 
     # 麦克风 - 一键录音：点一下开始，再点一下结束并发送（JS 直接采集，不弹录音组件）
     mic_btn.click(fn=None, inputs=None, outputs=[mic_status, mic_input], js=MIC_RECORD_JS)
     mic_input.change(process_mic_data, [mic_input, chat, surname, gender, is_muted, personality, current_conv_id, history_dropdown],
                      [txt, chat, audio_output, current_conv_id, history_dropdown]).then(
-        refresh_panels, outputs=[events_display, reminders_display]
+        refresh_panels, outputs=[events_display, reminders_display, sidebar_cards]
     ).then(play_mic_reply_audio, [chat, is_muted, mic_input], [audio_output])
 
     # 静音
     mute_btn.click(toggle_mute, [is_muted], [is_muted, mute_btn, audio_output])
 
     # 新建对话
-    new_conv_btn.click(new_conversation, [], [chat, current_conv_id, history_dropdown]).then(refresh_panels, outputs=[events_display, reminders_display])
+    new_conv_btn.click(new_conversation, [], [chat, current_conv_id, history_dropdown]).then(refresh_panels, outputs=[events_display, reminders_display, sidebar_cards])
 
     # 加载历史
     history_dropdown.change(load_conversation_by_id, [history_dropdown], [chat, current_conv_id])
@@ -2395,59 +2777,6 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
             return gr.update(value=path, visible=True)
         return gr.update(value=None, visible=False)
     emotion_btn.click(show_emotion_chart, [], [emotion_img])
-
-    # 任务10找回：我的小传
-    def show_biography():
-        text = ai_services.build_biography(memory_bank, user_memory["call_name"])
-        return gr.update(value=text)
-    bio_btn.click(show_biography, [], [bio_out])
-
-    # 首页性格选择：点一下试听对应音色 + 口头禅
-    PERSONA_CATCHPHRASE = {
-        "踏实务实": "我是小忆，我在这儿呢。您有啥事，直接跟我说就行。",
-        "风趣幽默": "您好您好，我是小忆！以后您无聊了，随时叫我～",
-        "暖心知心": "我是小忆呀，我在这儿呢，咱说说话吧～",
-    }
-    def preview_personality(p):
-        p = p if p in PERSONA_CATCHPHRASE else "踏实务实"
-        UI_STATE["personality"] = p
-        text = PERSONA_CATCHPHRASE[p]
-        audio = text_to_speech(text, voice_type=PERSONA_VOICE.get(p))
-        return (p,
-                gr.update(value=f"🔊 **{p}**：{text}", visible=True),
-                gr.update(value=audio, visible=True))
-    p_ipt.change(preview_personality, [p_ipt], [personality, preview_md, preview_audio])
-
-    # 隐私设置：大白话说明 + 一键删除所有记忆
-    def open_privacy():
-        return gr.update(value=PRIVACY_EXPLAIN), gr.update(visible=True)
-    privacy_btn.click(open_privacy, [], [privacy_md, privacy_del_btn])
-    privacy_del_btn.click(wipe_all_memory, [is_muted], [chat, privacy_md, privacy_audio])
-
-    # 记忆箱：打开时刷新全部内容（流程图/重要事件/总结/画像概述/照片）
-    def open_memory_box():
-        return (gr.update(visible=True),
-                gr.update(value=get_memory_box_flow_html()),
-                gr.update(value=get_memory_box_events_html()),
-                gr.update(value=get_memory_box_summary_html()),
-                gr.update(value=get_memory_box_profile_html()),
-                _box_event_choices(),
-                list_photos())
-    box_btn.click(open_memory_box, [],
-                  [box_view, box_flow_html, box_events, box_summary, box_profile,
-                   box_drop, box_gallery])
-    box_hide.click(lambda: gr.update(visible=False), [], [box_view])
-    box_forget_btn.click(forget_box_event, [box_drop], [box_drop, box_events, box_msg])
-
-    # 拍照/图片上传：点📷弹系统相册，选完存记忆箱并识别后进入对话
-    PHOTO_PICK_JS = ("() => { const el = document.querySelector('#photo-file input[type=file]');"
-                     " if (el) el.click(); return; }")
-    photo_btn.click(fn=None, inputs=None, outputs=[], js=PHOTO_PICK_JS)
-    photo_file.change(on_chat_photo,
-                      [photo_file, chat, surname, gender, is_muted, personality, current_conv_id, history_dropdown],
-                      [txt, chat, audio_output, current_conv_id, history_dropdown, photo_file]
-                      ).then(play_reply_audio, [chat, is_muted], [audio_output])
-
     # 定时器
     gr.Timer(30).tick(inject_proactive_message, [chat, is_muted, current_conv_id], [chat, audio_output])
     gr.Timer(30).tick(clean_old_audio_files, [])
@@ -2455,7 +2784,8 @@ with gr.Blocks(title="小忆陪伴助手") as demo:
     gr.Timer(3600).tick(prune_old_conversations, [], [])
     # 提醒调度轮询：到点的提醒推进聊天窗 + 播报 + 刷新提醒/记忆面板
     gr.Timer(15).tick(poll_reminder_events, [chat, is_muted, current_conv_id],
-                      [chat, audio_output, reminders_display, events_display])
+                      [chat, audio_output, reminders_display, events_display, sidebar_cards])
+
 
 if __name__ == "__main__":
     # 预览/外部托管时可经 --port / --host 或 PORT/HOST 环境变量覆盖端口与监听地址
@@ -2464,4 +2794,5 @@ if __name__ == "__main__":
     _ap.add_argument("--port", type=int, default=int(os.environ.get("PORT", 7861)))
     _ap.add_argument("--host", default=os.environ.get("HOST", "127.0.0.1"))
     _args = _ap.parse_args()
-    demo.launch(server_name=_args.host, server_port=_args.port, share=False, css=custom_css)
+    demo.launch(server_name=_args.host, server_port=_args.port, share=False, css=custom_css,
+                js=RECALL_INJECT_JS)

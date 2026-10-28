@@ -1,0 +1,113 @@
+拍照/摄像头功能 修改说明
+======================
+
+修改原因
+--------
+1. 项目原先完全没有看图/传图的入口（唯一的 gr.Image 是心情曲线展示图，不可交互），
+   "拍照功能没加"属实。
+2. 老人不会从本地文件选图，需要在网页上直接对着屏幕一拍就能发给小忆。
+
+修改内容
+--------
+改动文件：app.py（UI + 事件）、ai_services.py（只加一个占位钩子）。
+
+1. app.py 输入区新增"📷 给小忆看张照片"大按钮（≥48px）+ 点击展开的摄像头面板：
+   - photo_btn = gr.Button("📷 给小忆看张照片", elem_classes="photo-btn")
+   - photo_open = gr.State(False)  记录面板开/关
+   - photo_panel = gr.Column(visible=False)，内含
+     photo_input = gr.Image(sources=["webcam","upload"], type="filepath")
+     —— Gradio 原生支持"摄像头拍照 + 本地上传"两个入口，不用自己写 getUserMedia。
+
+2. custom_css 新增两条，放大按钮：
+   - .photo-btn button { min-height:48px; ... }     外层入口大按钮
+   - .photo-input button { min-width:48px; min-height:48px; }  拍照/上传子按钮
+
+3. 事件绑定：
+   - photo_btn.click(toggle_photo_panel,...) 展开/收起面板，按钮文案在
+     "📷 给小忆看张照片" 与 "✖ 收起拍照" 间切换。
+   - photo_input.change(on_photo,...) 拍完/选完自动：
+     a) 弹反馈气泡 "收到照片啦，我看看…"
+     b) 调用 ai_services.vision_recognize(image)（目前占位返回 None）
+     c) 写入当前对话（save_conversation）
+     d) 清空图片、关闭面板、恢复按钮文案，方便下次再拍。
+
+4. ai_services.py 新增占位函数 vision_recognize(image_path)：
+   - 归 AI工程师④，当前恒返回 None；接上视觉识别后自动往下走，无需再改前端。
+
+效果
+----
+- 老人点一下大按钮 → 弹出摄像头 → 对着屏幕一拍 → 自动出"收到照片啦，我看看…"气泡。
+- 保留"上传本地图"入口（sources 里同时含 upload）。
+
+注意
+----
+- 摄像头 getUserMedia 要求页面运行在 localhost 或 HTTPS。若用 http://局域网IP 访问，
+  浏览器会禁用摄像头（上传选图仍可用）。
+- 拍照/上传子按钮的 48px 放大靠 CSS 选择器 .photo-input button 生效，建议浏览器里
+  实机看一眼，若 Gradio 内部类名不同可再微调选择器。
+
+追加修改（一次）：内置英文文案汉化
+--------------------------------
+- 问题：gr.Image 自带的 "Click to Access Webcam / Drop Image Here / Click to Upload"
+  等英文无法用参数改。
+- 做法：新增常量 PHOTO_UI_I18N_JS（MutationObserver 扫描 body 文本，把上述英文替换为
+  中文："点击打开摄像头 / 把图片拖到这里 / 或点击上传 / 摄像头 / 上传 / 移除图片"）。
+- 挂载：demo.load(None, None, None, js=PHOTO_UI_I18N_JS)，页面加载即执行；
+  MutationObserver 能覆盖到"拍照面板延迟挂载"时才出现的英文。
+
+追加修改（二次）：修复"进网页一直加载中"
+------------------------------------
+- 问题：demo.load(fn=None, ..., js=...) 会让 Gradio 前端误以为加载事件未完成，页面一直转圈。
+- 修复：改成空函数 _i18n_bootstrapper() + show_progress=False：
+  demo.load(_i18n_bootstrapper, None, None, show_progress=False, js=PHOTO_UI_I18N_JS)。
+
+追加修改（三次）：彻底移除 demo.load，改用 launch 的 head 注入
+--------------------------------------------------------
+- 结论：Gradio 6.14 的 demo.load + js 无论 fn=None 还是空函数，都会让前端卡在"加载中"。
+  （实测 gr.Blocks 无 head/js/css 参数；demo.launch 才有 head/js/css 参数。）
+- 最终方案：
+  1) 彻底删掉 demo.load(...) 这一行及其 _i18n_bootstrapper 定义。
+  2) 汉化 JS 通过 demo.launch(..., head=f"<script>{PHOTO_UI_I18N_JS}</script>") 注入 <head>，
+     script 原生执行，不经过 Gradio 事件系统，不会再卡加载。
+  3) PHOTO_UI_I18N_JS 内部加 DOMContentLoaded 延迟启动，避免 head 里脚本早于 body 执行时
+     document.body 为空而报错。
+  4) 修正了因此产生的 if __name__ 缩进（恢复列 0）。
+
+追加修改（四次）：改成微信式底部图标栏（麦克风/图片/摄像机）
+-------------------------------------------------------
+- 需求：像微信电脑端一样，输入框下面一排图标（🎙️ 麦克风 / 🖼️ 图片 / 📷 摄像机），点一下直接能用。
+- 更大的改动（替换旧的"大按钮+gr.Image 摄像头面板"方案）：
+  1) UI：输入区改为 [输入框 | 发送 | 静音]，其下新增一排 .toolbar-icons 三个圆形图标按钮
+     （taskbar-icons：img_btn 🖼️ / cam_btn 📷，麦克风 mic_btn 挪到这一排）。
+  2) 相机改用自研 getUserMedia（不再用 gr.Image webcam）：新增常量 CAMERA_JS，
+     点「📷」第一次开摄像头并在 .cam-overlay 浮层实时预览，再点一次抓帧拍照转 base64。
+  3) 图片改用原生 file input：新增常量 FILE_JS，点「🖼️」弹文件选择框，
+     FileReader 读出 base64。
+  4) 数据回传沿用麦克风的同一套隐藏通道模式：图标 .click(fn=None, outputs=[...], js=...)
+     把 base64 写进隐藏 imgcam_channel 文本框 → imgcam_channel.change 触发 on_media_base64
+     （落盘 uploads/ 、弹"收到照片啦，我看看…"气泡、调用 ai_services.vision_recognize 钩子）。
+  5) 删除：photo_btn / photo_open / photo_panel / photo_input（gr.Image）以及
+     PHOTO_UI_I18N_JS 常量与其 demo.launch head 注入（不再需要汉化，不用 gr.Image 了）。
+注意
+- 摄像头需要 localhost 或 HTTPS；http://局域网IP 会被浏览器禁用 getUserMedia。
+- 📷 目前是"点一次开、再点一次拍"两下操作；如需"开相机后用浮层里的拍照键一键拍",
+   需把拍照键接回 Gradio 再回到后端，可进一步做。
+
+追加修改（五次）：修复"整屏黑影、点击无响应"
+----------------------------------------
+- 问题：.cam-overlay 里写了 display:flex !important，!important 覆盖了元素上的
+  style="display:none"，导致这个整屏黑色半透明浮层永远显示，盖住页面并拦截所有点击。
+- 修复：删掉 .cam-overlay 的 display:flex !important。默认靠内联 display:none 隐藏，
+  打开相机时 JS 才设置 ov.style.display='flex'，关闭时设回 none。
+
+追加修改（六次）：浮层里加「📸拍照」「✕关闭」两个按钮
+--------------------------------------------------
+- 需求：开相机后浮层只有画面，缺拍照/关闭按钮。改为浮层内直接提供两个按钮。
+- 做法：
+  1) CAMERA_JS 在浮层里渲染 <video> + 「📸 拍照」「✕ 关闭」两个原生 <button>
+     （onclick 分别调全局 window.__xyCap() / __xyClose()）。
+  2) __xyClose：关轨道、清空并隐藏浮层、复位状态。
+  3) __xyCap：抓帧转 base64，暂存 pendingB64，再 programmatic-clik 工具栏 cam_btn
+     （elem_id=xy-cam-trigger）触发 Gradio 事件 -> CAMERA_JS 检测 pendingB64 直接回传后端。
+     也就是浮层拍照按钮与"再点一次📷"走同一条回传链路。
+  4) cam_btn 增加 elem_id="xy-cam-trigger"；新增 .cam-btn / .cam-btns 样式。
