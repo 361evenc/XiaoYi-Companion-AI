@@ -1,0 +1,286 @@
+/* ============================================================
+   小忆 · 设计系统（暖米底 + 双强调色，老人友好）
+   ------------------------------------------------------------
+   红线上线（旧版迭代确定，硬性）：
+   - 正文 ≥ 18px，聊天气泡 20px，按钮高度 ≥ 48px
+   - 圆角 8 / 12 / 16
+   - 文字对比度 ≥ 4.5 : 1
+   ============================================================ */
+
+:root {
+  /* 颜色：暖米底，只留 2 个强调色 */
+  --color-bg: #FEF8ED;          /* 暖米底 */
+  --color-surface: #FFFFFF;     /* 表面白 */
+  --color-surface-soft: #FAF1E2;
+  --color-accent: #C88A52;      /* 焦糖（暖） */
+  --color-accent-deep: #B3753D; /* 焦糖深（hover） */
+  --color-accent2: #3E825F;     /* 深青绿（冷，用于成功/强调文字/小忆标签） */
+  --color-accent2-deep: #2F6A4C;
+  --color-text: #2D1B0E;        /* 正文深棕，对比度达标 */
+  --color-text-sub: #6B5A49;    /* 次级文字 */
+  --color-text-on-accent: #2D1B0E;
+  --color-border: #E7D9C2;
+  --color-danger: #B3402F;      /* 危险操作（隐私删除），深红保证对比 */
+
+  /* 字号：老人友好 */
+  --font-body: 18px;
+  --font-bubble: 20px;
+  --font-title: 26px;
+  --font-subtitle: 20px;
+  --font-small: 16px;           /* 仅辅助说明，不用于正文 */
+
+  /* 圆角 */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+
+  /* 控件尺寸 */
+  --btn-height: 48px;
+  --input-height: 52px;
+
+  --shadow: 0 4px 16px rgba(45, 27, 14, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  font-size: var(--font-body);
+  line-height: 1.6;
+  color: var(--color-text);
+  background: var(--color-bg);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- 通用按钮：高度 ≥48px，字号 ≥18px ---------- */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: var(--btn-height);
+  padding: 0 20px;
+  font-size: var(--font-body);
+  font-weight: 600;
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease, border-color 0.15s ease;
+}
+.btn:active {
+  transform: translateY(1px);
+}
+.btn-primary {
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  border-color: var(--color-accent);
+}
+.btn-primary:hover {
+  background: var(--color-accent-deep);
+}
+.btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-color: var(--color-accent);
+}
+.btn-secondary:hover {
+  background: var(--color-surface-soft);
+}
+.btn-success {
+  background: var(--color-accent2);
+  color: #FFFFFF;
+  border-color: var(--color-accent2);
+}
+.btn-success:hover {
+  background: var(--color-accent2-deep);
+}
+.btn-danger {
+  background: var(--color-surface);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+}
+.btn-danger:hover {
+  background: #FBEfE9;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- 输入框 ---------- */
+.input,
+.select,
+.textarea {
+  width: 100%;
+  min-height: var(--input-height);
+  padding: 12px 16px;
+  font-size: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+}
+.textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+.input:focus,
+.select:focus,
+.textarea:focus {
+  outline: none;
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px rgba(200, 138, 82, 0.2);
+}
+
+/* ---------- 卡片 ---------- */
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  padding: 20px;
+  box-shadow: var(--shadow);
+}
+
+/* ---------- 顶部条（通用） ---------- */
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 20px;
+  background: var(--color-surface);
+  border-bottom: 1px solid var(--color-border);
+}
+.topbar-title {
+  font-size: var(--font-title);
+  font-weight: 700;
+}
+
+/* 返回按钮：二级页通用，字号 18px */
+.back-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: var(--btn-height);
+  font-size: var(--font-body);
+  font-weight: 600;
+  color: var(--color-accent2);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+}
+.back-link:hover {
+  color: var(--color-accent2-deep);
+}
+
+/* ---------- 页面容器 / 主界面布局 ---------- */
+.page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+.app-shell {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+.app-sidebar {
+  width: 340px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 12px;
+  overflow-y: auto;
+  background: var(--color-surface-soft);
+  border-right: 1px solid var(--color-border);
+}
+.app-chat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* ---------- 聊天气泡 ---------- */
+.bubble {
+  max-width: 78%;
+  padding: 14px 18px;
+  border-radius: var(--radius-lg);
+  font-size: var(--font-bubble);
+  line-height: 1.55;
+  word-break: break-word;
+}
+.bubble-user {
+  align-self: flex-end;
+  background: var(--color-accent);
+  color: var(--color-text-on-accent);
+  border-bottom-right-radius: var(--radius-sm);
+}
+.bubble-bot {
+  align-self: flex-start;
+  background: var(--color-surface);
+  color: var(--color-text);
+  border-left: 4px solid var(--color-accent2);
+  border-bottom-left-radius: var(--radius-sm);
+}
+
+/* ---------- 快捷语按钮 ---------- */
+.quick-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.quick-btn {
+  flex: 1 1 auto;
+  min-height: var(--btn-height);
+  padding: 0 16px;
+  font-size: var(--font-body);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: 24px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.15s ease;
+}
+.quick-btn:hover {
+  background: var(--color-surface-soft);
+  transform: translateY(-1px);
+}
+
+/* ---------- 自适应：三端 ---------- */
+/* 平板：左栏收窄 */
+@media (max-width: 1024px) {
+  .app-sidebar {
+    width: 280px;
+  }
+}
+/* 手机：左栏卡片折叠到顶部，聊天区为主 */
+@media (max-width: 768px) {
+  .app-shell {
+    flex-direction: column;
+  }
+  .app-sidebar {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border);
+    padding: 10px 8px;
+  }
+  .bubble {
+    max-width: 90%;
+  }
+}

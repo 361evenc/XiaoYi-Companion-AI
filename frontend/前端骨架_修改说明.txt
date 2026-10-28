@@ -1,0 +1,63 @@
+前端骨架 · 修改说明
+生成时间：2026-10-28
+
+一、修改原因
+按《前端重构_任务清单.md》Phase 2，把「小忆」App 的前端从 Gradio 换成 Vue3 + Vite。
+本阶段只做「静态骨架 + 设计系统」，不接后端接口（接口留 Phase 3+）。
+采用并存策略：新建 frontend/，不动 app.py 与 backend/。
+
+二、采用方案
+- 框架：Vue 3 + Vite + Vue Router + Pinia + axios
+- 无登录无 token：会话状态（姓氏/性别/性格/静音）由 Pinia 存 localStorage，请求体传后端
+- 接口：axios 已按后端端点预留封装（api/index.js），Phase 2 仅占位不调用
+- 布局：欢迎页 → 主界面（左栏 4 卡片 + 右侧聊天）→ 3 个二级页（记忆箱/历史/隐私），带←返回
+- 响应式：桌面（左栏 340px）/ 平板（280px）/ 手机（左栏折叠为顶部横排）三端自适应
+
+三、设计系统落地（老人友好红线，全部照做）
+- 暖米底 #FEF8ED；只留 2 强调色：焦糖 #C88A52 + 深青绿 #3E825F
+- 正文 18px、聊天气泡 20px、按钮高 ≥48px、圆角 8/12/16、正文深棕 #2D1B0E 对比度达标
+- 主按钮焦糖底+深字、危险操作深红 #B3402F、成功/强调用深青绿，均确保文字对比 ≥4.5:1
+
+四、新建文件清单
+frontend/
+├─ package.json               # 依赖与脚本（dev/build/preview）
+├─ vite.config.js            # 端口 5173 + 代理 /api /audio /ws 到 8000（Phase 3+ 用）
+├─ index.html                # 入口，标题「小忆 · 暖心陪伴」
+└─ src/
+   ├─ main.js                # 挂载 Vue + Pinia + Router
+   ├─ App.vue                # 根组件（仅路由出口）
+   ├─ assets/main.css        # 设计系统：CSS 变量 + 通用按钮/输入/气泡/布局 + 响应式
+   ├─ router/index.js        # 5 条路由：/ /chat /memory /history /privacy
+   ├─ stores/session.js      # Pinia 会话状态（本地持久化）
+   ├─ api/index.js           # axios 封装（对应后端 16+ 端点，占位）
+   ├─ components/
+   │  ├─ SidebarCards.vue    # 左栏 4 入场卡片（记忆箱/历史/隐私/提醒）
+   │  ├─ ChatBubble.vue      # 聊天气泡（用户=焦糖 / 小忆=白底+深青绿左条）
+   │  └─ InputCard.vue       # 快捷语 + 输入框 + 发送 + 麦克风/图片/拍照/静音/撤回
+   └─ views/
+      ├─ Welcome.vue         # 欢迎页：姓氏/性别/性格 + 试听 + 进入聊天
+      ├─ Chat.vue            # 主界面：左栏卡片 + 右侧聊天区 + 快捷语 + 输入
+      ├─ Memory.vue          # 记忆箱：竖向流程图 + 重要事件 + 心情曲线
+      ├─ History.vue         # 历史对话：搜索 + 列表 + 新建/删除
+      └─ Privacy.vue         # 隐私设置：大白话说明 + 忘掉这件事 + 清空全部记忆
+
+五、验证结果（已跑通）
+- npm install 成功（65 包）；npm run build 成功（46 模块，无编译错误）
+- 浏览器实测（dev server）：欢迎页 / 主界面 / 三个二级页路由均正常渲染、返回按钮可用，无报错
+- 三端自适应 CSS 已内置（未逐屏实拍，逻辑经代码审查确认）
+
+六、端口说明（重要）
+- 本机 5173 已被无关项目「光影重生」占用的 dev server 占用
+- 因此本项目的 `npm run dev` 会自动切到 5174（Vite 默认行为）
+- 启动方式（在 frontend/ 目录下）：
+  cd frontend
+  npm install
+  npm run dev
+  然后浏览器打开 http://localhost:5174
+
+七、待办（后续期）
+- Phase 3：接入 /api/setup 与 /api/chat（真实对话、历史列表/切换/删除/搜索）
+- Phase 4：语音双向（录音→/api/asr、/api/tts 整段返回自动播放+字幕、静音、音色切换）
+- Phase 5：提醒（/api/reminders* 列表/完成/取消 + /ws 推送）
+- Phase 6：记忆箱真实数据（/api/memory、/api/emotion-chart）、隐私真删（/api/forget、wipe）、照片、撤回
+- Phase 7：PWA 可安装、三端打磨、对照回归后删旧 Gradio 壳

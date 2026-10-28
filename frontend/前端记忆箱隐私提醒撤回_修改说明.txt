@@ -1,0 +1,67 @@
+前端记忆箱/隐私/提醒/撤回 · 修改说明
+============================================================
+
+【修改原因】
+对应后端 Phase 5A–6C 新增接口，前端把此前静态占位的页面/按钮接上真实数据：
+隐私页「忘掉/清空」、左栏提醒抽屉、记忆箱页、心情曲线、消息撤回。
+
+【修改内容】
+
+1. src/views/Privacy.vue
+   - 「忘掉一件事」接 POST /api/forget：输入文本 → 显示后端返回 message
+     （删成功显示绿色提示，没匹配显示红色提示）
+   - 「清空全部记忆」接 DELETE /api/memory/wipe：二次确认后调用；成功后
+     本地会话作废（convId 清空、initialized=false）并跳回欢迎页重新认识
+
+2. src/components/SidebarCards.vue
+   - 提醒抽屉接 GET /api/reminders：展开时拉取，显示「等您确认」（✅ 完成）
+     与「未到点」（✖ 取消 + 相对时间）两类；完成/取消后自动刷新；
+     底部显示最近 30 天统计（提醒/办妥/完成率）
+   - 卡片副标题随提醒数量变化（"还有 N 件 · 点我展开"）
+
+3. src/views/Memory.vue
+   - 接 GET /api/memory：重要事件 ⭐ 时间线、照片缩略图（/photos）、
+     小忆的理解（反思）
+   - 「查看心情曲线」接 GET /api/emotion-chart：有图显示图片，
+     数据不足给空态提示
+
+4. src/views/Chat.vue + src/components/InputCard.vue
+   - 撤回按钮（↩️）接上：emit('recall') → POST /api/recall →
+     用返回 chat_history 整体替换消息列表，清空字幕并停止播放
+
+5. src/api/index.js
+   - wipeMemory 支持传 is_muted；新增 recall 端点
+
+6. vite.config.js
+   - 新增 /photos 代理到后端（与 /api、/audio 同理）
+
+【验证】
+- npm run build 通过
+- 后端接口全绿（对应后端修改说明的验证部分）
+- 浏览器 UI 请按以下步骤人工确认：
+  ① 聊天页左栏「提醒事项」点开 → 显示统计"提醒2次·办妥1次·完成率50%"
+  ② 「记忆箱」页 → 流程图正常、照片缩略图 2 张、「查看心情曲线」出图
+  ③ 「隐私设置」→ 输入"腿疼"点忘掉 → 红色提示"没找到"；不真点清空确认即可
+
+------------------------------------------------------------
+【追加：Phase 7A 主动关怀推送 + Phase 7B PWA（2026-10-28 完成）】
+
+7A 主动关怀推送（src/views/Chat.vue）：
+- WebSocket 连接：mounted 时连 ws://host/ws?conv_id=当前会话；断线 10 秒
+  自动重连；离开页面清理连接与定时器。
+- 收到到点提醒 → 消息列表追加 + WebAudio 提示音（392/523/659Hz 三音符，
+  与旧版后端 _make_chime 频率一致；静音时仍保留提示音，同旧版语义）
+  + 大字幕更新。
+- 主动关怀轮询：每 30 秒 POST /api/proactive，触发时复用
+  handleChatResponse 渲染并响提示音（内部有 15 秒互动节流）。
+
+7B PWA（vite.config.js + public/ 图标 + package.json）：
+- 新增依赖 vite-plugin-pwa（devDependency）。
+- 配置：name「小忆 · 暖心陪伴」、standalone、主题色 #C88A52、暖米底
+  #FEF8ED、192/512 图标；registerType autoUpdate。
+- 预缓存外壳（JS/CSS/图标 7 项 ≈198KB）：断网刷新仍能打开界面；
+  动态接口不缓存（防止吃到旧数据）。
+- vite preview 端口 5180，与 dev 共用 /api、/audio、/photos、/ws 代理。
+
+验证：npm run build 通过并生成 sw.js / manifest.webmanifest / 图标；
+proactive/WS 后端链路见后端修改说明。

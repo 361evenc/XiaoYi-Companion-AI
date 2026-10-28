@@ -55,3 +55,16 @@ voice_samples/
 
 # IDE 目录
 .trae/
+
+# ===== 前后端重构新增（2026-10-28） =====
+# 用户聊天记录与画像（运行时隐私数据，不入库）
+conversations.json
+用户画像.txt
+
+# 用户上传的照片与文件（运行时数据）
+photos/
+uploads/
+
+# 前端构建依赖与产物（npm install / build 生成）
+node_modules/
+dist/

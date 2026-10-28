@@ -1,0 +1,31 @@
+前端拍照/上传图片 · 修改说明
+============================================================
+
+【修改原因】
+输入区工具条里的「🖼️ 发照片」「📷 拍照」按钮此前是静态占位（没有 @click），
+用户点击没有任何反应。本次补齐这两个按钮的可用功能。
+
+【修改内容】
+
+1. src/components/InputCard.vue
+   - 🖼️ 发照片：点击触发隐藏的文件选择器（accept="image/*"），选中后用
+     FileReader 读成 base64，emit('photo', { mime, base64 })。
+   - 📷 拍照：点击打开摄像头覆盖层（fixed 全屏蒙层 + <video> 预览 + 拍照/取消），
+     getUserMedia 获取摄像头；拍照时用 canvas 捕获当前画面，等比缩放限制在
+     1280px 内，输出 jpeg(base64)，关闭后 emit('photo', …)。
+   - 失败路径 emit('photo-error', 提示文案)。
+
+2. src/views/Chat.vue
+   - 新增 onPhoto()：调 POST /api/photo，把返回交给 handleChatResponse 统一渲染
+     （会话 id / 聊天历史 / 大字幕 / 语音自动播放）。
+   - 抽出 handleChatResponse(d) 供 /api/chat 与 /api/photo 共用，避免重复。
+
+3. src/api/index.js
+   - 新增 photo 端点：api.photo(payload) → POST /photo。
+
+【降级说明】
+前端流程完整；真实视觉识别/回复/语音需后端有对应的 VISION / DeepSeek / 火山
+key，本机未配置时会降级（仅存图、走兜底话术、无语音），但不影响按钮交互。
+
+【验证】
+npm run build 通过；后端 /api/photo 返回 200。

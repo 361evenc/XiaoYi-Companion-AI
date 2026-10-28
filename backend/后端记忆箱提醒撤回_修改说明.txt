@@ -1,0 +1,60 @@
+后端记忆箱/提醒/撤回 · 修改说明
+============================================================
+
+【修改原因】
+推进 Phase 5A–6C：隐私删除、提醒事项、记忆箱、心情曲线、消息撤回
+五项功能在旧版 Gradio 已有，但新 FastAPI 后端未暴露接口。本次补齐后端服务与端点。
+
+【修改内容】
+
+1. backend/services/memory_service.py（新建）
+   - forget(text)：按文本语义匹配真删记忆（复用 ai_services.forget_by_request：
+     关键词事件表 + memory_bank 双层删除），落盘 memory_events.json
+   - wipe(is_muted)：复用 app.wipe_all_memory 清空记忆库/事件/画像/聊天记录/
+     提醒/心情/主动状态（先备份到 backups/）
+   - box()：记忆箱数据（重要事件 importance>=7 最近 10 条 + photos/ 照片
+     最近 20 张 → /photos URL + 小忆反思 5 条 + 用户画像文本）
+   - emotion_chart()：复用 app.generate_emotion_chart 生成心情曲线图，
+     图片经 /audio 路由返回 URL
+
+2. backend/services/reminder_service.py（新建）
+   - list()：awaiting_confirm（等确认，前端给✅完成）+ pending（未到点，前端给
+     ✖取消，排除重复显示）+ stats + notices，复用 reminder_store 与
+     reminder.describe_reminder；CONFIRM_WINDOW 与旧版一致（6 小时）
+   - done(rid) / cancel(rid)：与语音"办好了/取消"同一条 confirm/cancel 逻辑
+
+3. backend/services/chat_service.py
+   - 新增 recall(conv_id)：从 conversations.json 摘掉当前对话最后一轮
+     （user+assistant）并落盘；调用 ai_services.recall_message 钩子
+     （现为占位返回 None）；返回更新后的纯文本 chat_history
+
+4. backend/api/memory.py（新建）+ api/chat.py + main.py
+   - POST /api/forget、DELETE /api/memory/wipe、GET /api/memory、
+     GET /api/emotion-chart、POST /api/recall、GET/POST /api/reminders*
+   - main.py 挂载 memory/reminder 路由 + 新增 /photos 静态目录（photos/）
+
+【验证】
+- /api/reminders 200：stats {提醒2次 办妥1次 完成率50%}（旧版数据）
+- /api/memory 200：照片 2 张、画像 13 字符
+- /api/emotion-chart 200：image_url 正常生成（matplotlib 可用）
+- /api/recall 正向链路：新建会话→聊1句(2条)→撤回(0条)→后端确认→删除测试会话
+- /api/forget 空文本/未匹配分支均给出明确提示
+
+【遗留（Phase 7）】
+- 主动关怀 WebSocket 推送、PWA 见任务清单 Phase 7A/7B，尚未实施。
+
+------------------------------------------------------------
+【追加：Phase 7A 主动关怀推送（2026-10-28 完成）】
+1. backend/api/ws.py（新建）
+   - WebSocket 端点 /ws?conv_id=xxx：每秒 drain reminder_queue（旧版靠 Gradio
+     1 秒轮询），到点提醒先落盘进当前对话（get_conversation_messages_by_id
+     + save_conversation，同旧版 poll_reminder_events 语义），再推
+     {type:"reminder", text}。连接断开静默收尾，前端负责重连。
+2. backend/services/chat_service.py + api/chat.py
+   - 新增 proactive(is_muted, conv_id)：复用旧版 inject_proactive_message
+     （>15 秒无互动 + 触发信号节流），POST /api/proactive 供前端 30 秒
+     轮询；无触发时轻量返回 {triggered:false}。
+   - POST /api/proactive 端点。
+3. backend/main.py：挂载 ws.router。
+
+验证：proactive 无/坏 conv_id 均返回 triggered:false；WS 握手 OPEN 正常。

@@ -1,0 +1,46 @@
+前端语音双向功能 · 修改说明
+============================================================
+
+【修改原因】
+Phase 4「语音双向」——为老人友好的「小忆」陪伴 App 补齐语音链路：
+- 支持按住式录音并转成火山 ASR 要求的 WAV（16kHz/16bit/单声道）
+- 聊天气泡收到整段 TTS 语音后，未静音时自动播放，并同步显示大字幕
+- 主界面可直接切换小忆性格（影响说话音色），欢迎页可试听各音色
+- 静音开关联动：静音时后端不合成、前端不播放
+
+【修改内容】
+
+1. 新建 frontend/src/utils/audio.js
+   - createRecorder()：MediaRecorder 录音 → 停止后返回 base64 WAV
+   - blobToWav16kBase64()：用 Web Audio 解码任意浏览器音频，
+     离线重采样到 16kHz 单声道 → PCM16 → 封装标准 WAV → base64
+   - PERSONA_VOICE：人格→火山音色映射（与后端 app.PERSONA_VOICE 一致）
+
+2. frontend/src/components/InputCard.vue
+   - 麦克风按钮从静态占位改为真录音：点击开始（🔴 脉冲高亮）/ 再点结束
+   - 录音结果 emit('audio', base64) 交给父组件；失败 emit('recording-error', msg)
+
+3. frontend/src/views/Chat.vue
+   - 新增人格切换条（踏实务实/风趣幽默/暖心知心），点击即切换并持久化
+   - 隐藏 <audio> 元素：/api/chat 返回 audio_url 且未静音时自动播放
+   - 新增「大字幕」区：显示小忆最新回复文本，播放中带「🔊 小忆正在说」提示
+   - 录音结束 → api.asr 识别 → 文本 → 复用文字发送链路；识别为空提示「没听清」
+   - 静音联动：未静音才 play()，始终更新字幕文本
+
+4. frontend/src/views/Welcome.vue
+   - 「试听」按钮接入 /api/tts，按人格音色合成一句并播放
+
+5. frontend/src/stores/session.js
+   - 新增 setPersonality(p) 动作，切换性格并写本地存储
+
+【重要说明：真实语音降级】
+本机未配置火山引擎 key（无 VOLC_ACCESS_TOKEN / VOLC_APP_ID），
+因此后端 ASR / TTS 会优雅降级（ASR 返回空文本、TTS 返回 audio_url=null）。
+前端语音链路逻辑已完整实现并在浏览器验证通过（录音按钮状态、大字幕、
+静音开关、人格切换、试听按钮均正常），真实语音需后续配置 key 后即可生效。
+此外 DeepSeek 无 key 时聊天回复走兜底话术，与本改动无关。
+
+【验证】
+- npm run build 通过（vite build）
+- 浏览器端到端验证 6 项全通过：欢迎页元素、进入聊天、聊天页语音元素、
+  人格切换高亮、静音文字切换、发送后出大字幕；控制台无报错。
