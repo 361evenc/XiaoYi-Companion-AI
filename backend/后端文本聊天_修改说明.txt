@@ -1,0 +1,29 @@
+后端 文本聊天 setup 端点 · 修改说明
+生成时间：2026-10-28
+
+一、修改原因
+按《前端重构_任务清单.md》Phase 3「接 /api/setup（欢迎页提交 → 进入主界面）」，前端需要
+一个等价于旧版 Gradio enter_chat 的初始化接口。Phase 1 建的后端只提供了 /api/chat、
+/api/conversations* 等，没有 /api/setup，故本次补上。
+
+二、修改内容
+1. backend/services/chat_service.py 新增 setup() 函数：
+   - 按 surname/gender 计算称呼（get_call_name），写入 user_memory["call_name"]
+   - 设置 UI_STATE["personality"]
+   - 生成欢迎语 + 跨会话问候（build_cross_session_greeting）
+   - 返回与 chat() 同构的打包（reply / audio_url / conv_id / chat_history / panels）
+   - audio_url 暂置 None（欢迎语音留 Phase 4）
+
+2. backend/api/chat.py 新增 SetupRequest 模型 + POST /api/setup 路由：
+   - 入参 {surname, gender, personality, is_muted}
+   - 出参同 /api/chat 打包结构
+
+三、验证
+- python -m py_compile 通过
+- curl POST /api/setup（unicode 转义中文）返回 200，reply 含「您好张奶奶」+ 跨会话问候，
+  conv_id 正常生成，panels 三块面板均返回
+
+四、待办
+- 欢迎语音：Phase 4 接入 /api/tts，setup 后播报欢迎语
+- 对话内容仍为兜底话术：需配置 DEEPSEEK_API_KEY（local_secrets.json）才返回正式回复；
+  TTS 需配置火山引擎 appid/access_token（当前 TTS 报 code 3001 Missing app.appid）

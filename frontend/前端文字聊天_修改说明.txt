@@ -1,0 +1,46 @@
+前端 文字聊天闭环 + 历史 · 修改说明
+生成时间：2026-10-28
+
+一、修改原因
+按《前端重构_任务清单.md》Phase 3，把 Phase 2 的静态骨架接通后端，实现：
+- 欢迎页提交 → /api/setup 初始化会话 → 进入主界面
+- 文字聊天 → /api/chat 发消息、显示气泡、快捷语
+- 历史对话列表 / 加载 / 新建 / 删除 / 搜索
+
+二、修改文件清单
+frontend/
+├─ vite.config.js              # 代理 target 改为可配置（默认 8010，可用 XIAOYI_API_ORIGIN 覆盖）
+├─ src/stores/session.js       # 新增 chatHistory（内存接力）+ setConversation action
+├─ src/views/Welcome.vue       # 接 /api/setup：提交→loading→存会话→跳转（带错误提示）
+├─ src/views/Chat.vue          # 接 /api/chat：发送/快捷语→气泡渲染→loading→音频占位
+└─ src/views/History.vue       # 接 /api/conversations*：列表/搜索/新建/删除/点击加载
+
+三、关键实现要点
+1. 欢迎页 start() 改 async，调 api.setup，把返回的 conv_id + chat_history 写入 Pinia，
+   再跳转 /chat；失败给出「请确认后端已启动」提示。
+2. Chat.vue 发送消息时，chat_history 传「过去历史（不含本轮输入）」，user_input 单独传；
+   返回后用后端完整 chat_history 覆盖本地气泡 —— 与后端 chat_response 语义严格对齐。
+   发送期间显示「小忆正在想…」占位气泡。
+3. session store 新增 chatHistory 仅内存接力（Welcome→Chat / History→Chat），不落 localStorage；
+   持久化字段仍只有 surname/gender/personality/is_muted/conv_id/initialized。
+4. History.vue：搜索输入 300ms 防抖；点击条目调 GET /api/conversations/{id} 后回聊天页；
+   「新对话」调 POST /api/conversations；删除带 window.confirm 二次确认。
+
+四、端口约定（本机）
+- 后端 FastAPI 开发跑 8010（8000 被无关进程长期占用）：
+  python -m uvicorn backend.main:app --host 127.0.0.1 --port 8010 --workers 1
+- 前端 npm run dev 会因 5173 被占而自动切 5174：打开 http://localhost:5174
+- vite 代理默认指向 8010；如需换端口：XIAOYI_API_ORIGIN=http://127.0.0.1:8000 npm run dev
+
+五、验证结果（浏览器端到端实测通过）
+- 欢迎页填「张」→ 进入 /chat，出现含「张奶奶」的欢迎语气泡 ✅
+- 发「我今天挺好的」→ 用户气泡（焦糖）+ 小忆回复气泡正常，无错误 ✅
+- /history 列表出现该对话，时间正确 ✅
+- 点击历史对话 → 回读完整消息 ✅
+- npm run build 通过（105 模块，无编译错误）
+
+六、待办
+- 回复内容目前为兜底话术：本地模型未装（No module named 'transformers'）、DeepSeek 无 key，
+  需配置 DEEPSEEK_API_KEY 后才有正式回复（非前端接线问题）
+- audio_url 已由后端返回但前端未消费：Phase 4 接 <audio> 自动播放 + 大字幕
+- 提醒面板/记忆面板的 panels 数据（后端返回的 HTML）暂未渲染进左栏，Phase 5/6 接

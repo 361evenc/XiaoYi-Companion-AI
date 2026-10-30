@@ -1,0 +1,28 @@
+后端拍照/上传图片 · 修改说明
+============================================================
+
+【修改原因】
+前端输入区的「🖼️ 发照片」「📷 拍照」按钮原来是静态占位（无点击事件），
+点了没反应。旧版 Gradio 已有完整的「拍照/上传图片 → 存记忆箱 → 视觉识别
+→ 注入对话」逻辑（app.py 的 on_chat_photo / recognize_image / _save_photo_to_box），
+但新 FastAPI 后端尚未把它暴露成接口。本次补上后端图片接口。
+
+【修改内容】
+
+1. backend/services/chat_service.py
+   - 新增 photo()：接收图片 base64 + mime，写入临时文件 → 保存到记忆箱
+     （engine._save_photo_to_box）→ 视觉识别（engine.recognize_image）→
+     组装成「【我给您看张照片：…】」作为本轮用户输入 → 复用 chat() 返回
+     与 /api/chat 完全同构的打包（reply/audio_url/conv_id/chat_history/panels）。
+
+2. backend/api/chat.py
+   - 新增 PhotoRequest 模型与 POST /api/photo 端点。
+
+【降级说明】
+- 无火山 VISION key 时视觉识别降级为空串，但图片仍会存进记忆箱，回复提示
+  「（已收进记忆箱，内容我暂时认不出来）」。
+- 无 DeepSeek / 火山 TTS key 时，回复走兜底话术、audio_url 为 null（预期）。
+
+【验证】
+POST /api/photo 用 1x1 PNG 测试返回 HTTP 200，conv_id / chat_history 结构正确，
+图片被作为用户消息注入对话（history_len=2）。

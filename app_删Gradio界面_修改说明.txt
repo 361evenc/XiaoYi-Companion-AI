@@ -1,0 +1,47 @@
+app.py 删除 Gradio 界面段 · 修改说明
+============================================================
+
+【修改原因】
+前端重构（Vue3 + Vite + FastAPI）已全部完成，旧版 Gradio 界面不再使用，
+按用户要求删除旧代码。app.py 是新后端的「引擎库」（backend.core.state
+即 import app 复用其中全部函数），因此不能删整个文件，只删纯界面段。
+
+【修改内容】
+
+1. app.py
+   - 删除 2502–2798 行「Gradio 界面」段：
+     · 界面搭建（gr.Blocks：欢迎页/主界面/记忆箱/历史/隐私四个二级页）
+     · demo 回调函数（enter_chat / do_forget / on_media_base64 / on_recall /
+       show_emotion_chart / refresh_panels 等）与全部事件绑定
+     · gr.Timer 定时器（主动关怀/音频清理/历史修剪/提醒轮询）
+     · if __name__ == "__main__" 的 demo.launch 入口
+   - 原位置换成说明注释。删除前已备份：backups/app.py.20261028_删UI段前.bak
+   - python app.py 现在不再起界面（模块仅作引擎库被 backend 引用）。
+
+2. 定时任务归属（删段后无遗漏）
+   - 提醒调度轮询：app.py 模块级 daemon 线程，import 即启动，不受影响
+   - 音频清理/历史修剪：backend/core/background.py（Phase 1 已接管）
+   - 主动关怀注入：前端轮询 POST /api/proactive（Phase 7A 已上线）
+   - 提醒到点推送：WebSocket /ws（Phase 7A 已上线）
+   - backend/core/background.py：仅更新过时注释（原写"留到 Phase 5"）
+
+3. 启动小忆.bat
+   - 旧内容启动 python app.py --port 7100（Gradio），且依赖不存在的 venv，
+     已失效。改为新版启动方式：
+     后端：python -m uvicorn backend.main:app --port 8010
+     前端：cd frontend && npm run dev（Vite，5174）
+     并自动打开 http://localhost:5174
+
+【保留未删的旧文件说明】
+以下文件与 Gradio 界面无关，属于底层依赖或训练资产，予以保留：
+- ai_services.py / reminder.py / proactive.py / memory_system.py：引擎直接依赖
+- train_xiaoyi.py / download_model.py / merge_datasets.py / eval_memory.py /
+  test_*.py / convert_format.py / generate_multiturn.py / check_cache.py /
+  _bake_int8.py：模型训练与数据集工具（历史资产）
+- apply_app_fixes.py / apply_care_features.py：旧版补丁脚本（不再运行，无害）
+如需进一步删除训练工具类文件，请确认后告知。
+
+【验证（删除后回归，全部通过）】
+health / conversations / reminders / memory（照片 2 张）/ emotion-chart 出图 /
+proactive / tts、asr 降级分支 / chat 一轮兜底回复 / recall 撤回 / WS 握手，
+用户既有数据（对话、照片、提醒统计）完好。

@@ -1,0 +1,56 @@
+后端服务层抽取 · 修改说明
+生成时间：2026-10-28
+
+一、修改原因
+按《前端重构_任务清单.md》Phase 1，把前端从 Gradio 换成 Vue3 + Vite 之前，
+先把后端能力从 app.py 抽成 FastAPI 服务层，供前端通过 REST/curl 调用。
+目标是「并存不破坏」：保留 app.py 等旧文件，新建 backend/ 目录复用旧引擎。
+
+二、采用策略（重要）
+没有逐行复制 app.py 里 200 行的 chat_response 及其 30 多个依赖函数（易出错）。
+而是让 backend 直接 `import app`（旧版引擎），做「薄封装」：
+- app.py 中的 Gradio UI 构建在 `if __name__ == "__main__"` 外，但 launch 在
+  `if __name__ == "__main__"` 内（app.py 第 2790 行），所以 import 只会加载函数、
+  全局单例和后台线程，不会启动 Gradio 服务。
+- 服务层把 app.chat_response 的 tuple 结果（含 gr.update）转成干净的 JSON dict。
+
+三、新建文件清单
+backend/
+├─ requirements.txt            # fastapi / uvicorn[standard] / python-multipart
+├─ main.py                     # FastAPI 入口：挂路由 + 托管 /audio + CORS + 启动后台线程
+├─ core/
+│  ├─ config.py                # 把项目根插入 sys.path + 切 CWD 到项目根
+│  ├─ state.py                 # import app 一次，收敛全局单例（user_memory/UI_STATE/memory_bank/reminder_store）
+│  └─ background.py            # 维护类定时线程（清理音频/清理历史），提醒调度由 app.py 自带线程复用
+├─ api/
+│  ├─ chat.py                  # POST /api/chat（一次打包返回）
+│  ├─ voice.py                 # POST /api/tts、POST /api/asr
+│  └─ history.py               # GET/POST/DELETE /api/conversations*
+└─ services/
+   ├─ chat_service.py          # 对话主流程薄封装：去 gr.update，返回 reply+audio+conv_id+panels
+   └─ voice_service.py         # TTS 整段合成 / ASR 识别封装
+
+四、接口（Phase 1 已跑通）
+POST /api/chat        入参 {user_input, chat_history, surname, gender, is_muted, personality, conv_id}
+                      出参 {reply, audio_url, conv_id, chat_history, panels{memory, reminders, sidebar_cards}}
+POST /api/tts         {text, voice_type?, speed?, pitch?, volume?} → {audio_url}
+POST /api/asr         {audio_base64} → {text}
+GET  /api/conversations?search=
+GET  /api/conversations/{id}
+POST /api/conversations         新建对话
+DELETE /api/conversations/{id}  删除对话
+GET  /api/health               健康检查
+
+五、启动与验证（在项目根目录执行，单 worker）
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --workers 1
+
+验证过程：
+- python -m py_compile 全部新文件通过
+- curl /api/health 返回 {"status":"ok","local_model_ok":false,"personality":"踏实务实"}
+- curl /api/chat 返回完整打包：reply / audio_url / conv_id / chat_history / panels，
+  并把对话写入 conversations.json（与旧版共用同一份数据）
+
+六、待办（后续期）
+- 语音 TTS/ASR 需火山引擎 VOLC_ACCESS_TOKEN/VOLC_APP_ID 才真正合成（无 key 时返回 null，正常降级）
+- 对话回复需 DEEPSEEK_API_KEY（local_secrets.json）才返回正式内容，无 key 时返回兜底话术
+- 提醒到点推送 / 主动关怀注入 需 WebSocket 联动，留到 Phase 5
