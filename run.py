@@ -24,6 +24,21 @@ os.chdir(ROOT)  # 后端依赖项目根作为 CWD（数据文件/相对路径）
 frontend_proc = None
 
 
+def _frontend_dev_cmd():
+    """构造前端 dev 命令：优先系统 npm；找不到则退回 node 自带的 npm-cli.js。
+    （本机情形：node 在 PATH 但 npm/npm.cmd 不在，只有 node 旁的 node_modules/npm。）"""
+    import shutil
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm:
+        return f'"{npm}" run dev'
+    node = shutil.which("node") or shutil.which("node.exe") or "node"
+    npm_cli = os.path.join(os.path.dirname(os.path.abspath(node)),
+                           "node_modules", "npm", "bin", "npm-cli.js")
+    if os.path.exists(npm_cli):
+        return f'"{node}" "{npm_cli}" run dev'
+    return "npm run dev"   # 兜底
+
+
 def start_frontend():
     """以子进程方式启动 Vite（npm run dev）。已在跑则跳过。"""
     global frontend_proc
@@ -40,12 +55,13 @@ def start_frontend():
 
     cwd = os.path.join(ROOT, "frontend")
     try:
-        # Windows 下 npm 是 npm.cmd，必须 shell=True
+        # 命令由 _frontend_dev_cmd 自适应：npm 在 PATH 用 npm，否则退回 node 自带 npm-cli.js
+        cmd = _frontend_dev_cmd()
         frontend_proc = subprocess.Popen(
-            "npm run dev", cwd=cwd, shell=True,
+            cmd, cwd=cwd, shell=True,
             stdout=sys.stdout, stderr=sys.stderr,
         )
-        print("[run] 前端 Vite 已启动（端口见上方 vite 输出，默认 http://localhost:5174/）")
+        print(f"[run] 前端 Vite 已启动（{cmd}；端口见上方 vite 输出，默认 http://localhost:5174/）")
     except Exception as e:
         print(f"[run] 前端启动失败（不影响后端）: {e}")
     return frontend_proc
