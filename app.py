@@ -134,11 +134,15 @@ PERSONA_VOICE = {
 }
 
 # 任务5：说话节奏随场景变化——情绪 → 语速映射（speed_ratio 范围 [0.2, 3.0]）
-#   愉悦快一点、平淡保持默认 0.8、低落/关心慢一点
-EMOTION_SPEED = {"愉悦": 0.95, "平淡": 0.8, "低落": 0.7}
+#   愉悦快一点、平淡保持 0.85、低落/关心慢一点
+# 反馈11（任务③）：基准语速 0.8→0.9；analyze_emotion 输出英文标签（low/neutral/high），
+# 旧表只有中文键导致情绪语速从未生效——中英文键都放，双保险
+EMOTION_SPEED = {"high": 0.95, "neutral": 0.85, "low": 0.7,
+                 "愉悦": 0.95, "平淡": 0.85, "低落": 0.7}
+EMOTION_SPEED_DEFAULT = 0.9
 
 # 提醒播报专用参数：清晰有力（语速稍快、音调略抬、音量加大）
-REMINDER_TTS_PARAMS = {"speed": 0.85, "pitch": 1.05, "volume": 1.5}
+REMINDER_TTS_PARAMS = {"speed": 0.95, "pitch": 1.05, "volume": 1.5}
 # 主动关怀专用参数：放慢放柔（关心慢一点）
 CARING_TTS_PARAMS = {"speed": 0.7, "pitch": 1.0, "volume": 1.3}
 
@@ -149,10 +153,12 @@ from reminder import (ReminderStore, cn_to_int, parse_time_expr, humanize_ts,
                       escalated_message, missed_message, confirm_ack_message,
                       later_ack_message, clarify_time_message, list_message,
                       select_message, confirm_cancel_message, modify_ask_message,
-                      cancel_ack_message, abort_message, capability_message,
-                      is_complaint_about_reminder, split_thing_note)
-from memory_system import MemoryBank, match_symptoms, similarity
+                      cancel_ack_message, wont_ack_message, abort_message,
+                      capability_message, is_complaint_about_reminder,
+                      split_thing_note)
+from memory_system import MemoryBank, match_symptoms, similarity, _char_ngrams
 import ai_services
+import health_kb
 
 ASR_URL = "https://openspeech.bytedance.com/api/v1/asr"
 TTS_URL = "https://openspeech.bytedance.com/api/v1/tts"
@@ -687,7 +693,11 @@ def tts_request(text, voice_type=None, speed=0.8, pitch=1.0, volume=1.3):
         "request": {"reqid": str(uuid.uuid4()), "text": text, "text_type": "plain", "operation": "query"}
     }
     resp = http_session.post(TTS_URL, headers=headers, json=data, timeout=15)
-    result = resp.json()
+    try:
+        result = resp.json()
+    except Exception as e:            # 反馈11（任务③）：响应体非 JSON 等异常安全化
+        print(f"TTS响应解析失败: {e}")
+        return None
     if result.get("code") == 3000 and "data" in result:
         return base64.b64decode(result["data"])
     print(f"TTS返回异常: {result}")
@@ -709,19 +719,29 @@ def concat_wav_bytes(wav_list, gap_sec=0.25):
                     wf_out.writeframes(b'\x00\x00' * int(16000 * gap_sec))
     return out.getvalue()
 
+TTS_RETRY = 2   # 反馈11（任务③）：单句失败重试2次，仍失败跳过该句并记日志
+
 def text_to_speech(text, voice_type=None, speed=0.8, pitch=1.0, volume=1.3):
     if not text or text.strip() == "":
         return None
     try:
         sentences = split_sentences(text)
         wav_list = []
-        for s in sentences:
-            wav_bytes = tts_request(s, voice_type=voice_type,
-                                    speed=speed, pitch=pitch, volume=volume)
+        for idx, s in enumerate(sentences, 1):
+            wav_bytes = None
+            for attempt in range(1 + TTS_RETRY):
+                wav_bytes = tts_request(s, voice_type=voice_type,
+                                        speed=speed, pitch=pitch, volume=volume)
+                if wav_bytes:
+                    break
+                time.sleep(0.3 * (attempt + 1))   # 简单退避
             if wav_bytes:
                 wav_list.append(wav_bytes)
+            else:
+                print(f"[TTS] 第{idx}句重试{TTS_RETRY}次仍失败，跳过：{s[:20]}")
         if not wav_list:
             return None
+        # 反馈11（任务③）：所有句子合并成一个完整文件后再返回——300字连播不缺段
         audio_bytes = wav_list[0] if len(wav_list) == 1 else concat_wav_bytes(wav_list)
         audio_filename = f"audio_{int(time.time())}_{random.randint(1000,9999)}.wav"
         audio_path = os.path.join(TEMP_AUDIO_DIR, audio_filename)
@@ -731,6 +751,25 @@ def text_to_speech(text, voice_type=None, speed=0.8, pitch=1.0, volume=1.3):
     except Exception as e:
         print(f"TTS异常: {e}")
     return None
+
+# ========== 反馈11（任务⑧）：ASR 兜底——热词 + 同音/近音纠错表 ==========
+ASR_HOTWORDS = _load_secret("ASR_HOTWORDS")   # 火山 ASR 热词（boosting_table 内容或词表ID）
+# 同音/近音纠错：ASR 常听错的词 -> 正确词（识别结果落库/入上下文前修正）
+ASR_CORRECTIONS = {
+    "降压要": "降压药", "降压妖": "降压药", "江压药": "降压药",
+    "降糖要": "降糖药", "一岛素": "胰岛素", "夷岛素": "胰岛素",
+    "阿斯匹林": "阿司匹林", "他丁类": "他汀类", "阿托伐他丁": "阿托伐他汀",
+    "血糖移": "血糖仪", "血压移": "血压计", "关姐姐": "关节",
+    "孙志": "孙子", "外孙志": "外孙子", "曾孙志": "曾孙子",
+}
+
+def apply_asr_corrections(text):
+    """反馈11（任务⑧）：ASR 同音/近音纠错——识别文本统一过一遍再落库/进上下文"""
+    t = str(text or "")
+    for wrong, right in ASR_CORRECTIONS.items():
+        if wrong in t:
+            t = t.replace(wrong, right)
+    return t
 
 def transcribe_audio(audio_input):
     if audio_input is None:
@@ -747,16 +786,25 @@ def transcribe_audio(audio_input):
             return ""
         audio_base64 = base64.b64encode(wav_bytes).decode("utf-8")
         headers = {"Authorization": f"Bearer; {VOLC_ACCESS_TOKEN}", "Content-Type": "application/json"}
-        json_body = {
-            "app": {"appid": VOLC_APP_ID, "token": VOLC_ACCESS_TOKEN, "cluster": "volcengine_input_common"},
-            "user": {"uid": "xiaoyi_user"},
-            "audio": {"format": "wav", "rate": 16000, "bits": 16, "channel": 1, "language": "zh-CN", "data": audio_base64, "enable_itn": True, "enable_punc": True},
-            "request": {"reqid": str(uuid.uuid4()), "sequence": 1}
-        }
-        resp = http_session.post(ASR_URL, headers=headers, json=json_body, timeout=30)
-        result = resp.json()
+
+        def _asr_call(use_hotwords):
+            body = {
+                "app": {"appid": VOLC_APP_ID, "token": VOLC_ACCESS_TOKEN, "cluster": "volcengine_input_common"},
+                "user": {"uid": "xiaoyi_user"},
+                "audio": {"format": "wav", "rate": 16000, "bits": 16, "channel": 1, "language": "zh-CN", "data": audio_base64, "enable_itn": True, "enable_punc": True},
+                "request": {"reqid": str(uuid.uuid4()), "sequence": 1}
+            }
+            if use_hotwords:   # 热词：药名/家人名等易错词加权
+                body["request"]["boosting_table"] = ASR_HOTWORDS
+            resp = http_session.post(ASR_URL, headers=headers, json=body, timeout=30)
+            return resp.json()
+
+        # 反馈11（任务⑧）：带热词优先；返回非 1000 时去掉热词重发一次兜底
+        result = _asr_call(bool(ASR_HOTWORDS))
+        if result.get("code") != 1000 and ASR_HOTWORDS:
+            result = _asr_call(False)
         if result.get("code") == 1000 and "result" in result:
-            return result["result"][0]["text"]
+            return apply_asr_corrections(result["result"][0]["text"])
         print(f"ASR返回异常: {result}")
     except Exception as e:
         print(f"ASR异常: {e}")
@@ -798,9 +846,13 @@ from html import unescape as _html_unescape
 # 触发联网搜索的关键词（时效性/事实性问题）
 SEARCH_TRIGGERS = ["今天", "最新", "新闻", "天气", "现在", "最近", "目前",
                    "股价", "汇率", "热搜", "奥运会", "世界杯", "几号", "什么时候",
-                   "是谁", "谁是", "多少钱", "放假", "台风", "春晚"]
+                   "是谁", "谁是", "多少钱", "放假", "台风", "春晚",
+                   # 反馈11（任务⑨）：健康求医问药类触发搜索（权威源优先，过滤营销）
+                   "吃什么药", "怎么治", "副作用", "能吃吗", "不能吃",
+                   "禁忌", "吃什么好", "挂什么科"]
 
 def needs_search(text):
+    # 健康类问法走本地知识库（health_kb）优先；联网补充由上面的健康触发词单独控制
     return any(k in text for k in SEARCH_TRIGGERS)
 
 def _bocha_search(query, top_k=4):
@@ -1039,7 +1091,7 @@ def hotlist_context(text, top_n=10):
 # 任务8：拍照/上传图片 → 识别结果注入对话上下文；未配置 key 时如实说"暂时认不出"。
 VISION_API_BASE = _load_secret("VISION_API_BASE")   # OpenAI 兼容格式，如 https://api.xxx.com/v1
 VISION_API_KEY = _load_secret("VISION_API_KEY")
-VISION_MODEL = _load_secret("VISION_MODEL") or "qwen-vl-max"
+VISION_MODEL = _load_secret("VISION_MODEL") or "qwen3-vl-plus"   # 反馈11（任务④）：qwen-vl-plus 已下线，继任 qwen3-vl-plus
 
 def recognize_image(path):
     """识别图片内容，返回一句话描述；未配置/失败返回空串（不阻塞主流程）"""
@@ -1137,6 +1189,81 @@ Thread(target=_memory_worker, daemon=True).start()
 def get_memory_panel_html():
     return memory_bank.panel_html()
 
+# ========== 反馈2（任务⑥）：撤回——撤掉的话不许留在记忆里 ==========
+RECALL_CLEANUP_WINDOW = 15 * 60   # 只清"最近这一轮"引发的痕迹（秒），防误删更早的同类记忆
+
+def recall_cleanup(removed_user_msg):
+    """撤回最后一轮后的痕迹清除：关键词事件 + 记忆库（事实/情节，含回滚）
+    + 后台待抽取队列 + 该轮创建的提醒。返回各类清除计数（日志/测试用）。
+
+    注意：用户画像.txt 按任务⑦"只增不删"是长期资产，不在撤回清除范围；
+    对话里的下一轮上下文由撤回方（chat_service.recall）删除消息本身保证。
+    """
+    if isinstance(removed_user_msg, dict):
+        text = extract_text(removed_user_msg.get("content", "")).strip()
+    else:
+        text = extract_text(removed_user_msg).strip()
+    if not text:
+        return {"ok": False}
+    now = time.time()
+    counts = {"ok": True, "events": 0, "queue": 0, "reminders": 0, "bank": {}}
+
+    # 1) 后台待抽取队列：这一轮还没被抽进记忆库的，直接出队（防撤回后又被写入）
+    try:
+        pending = [qa for qa in _memory_queue if str(qa[0]).strip() != text]
+        counts["queue"] = len(_memory_queue) - len(pending)
+        if counts["queue"]:
+            _memory_queue.clear()
+            _memory_queue.extend(pending)
+    except Exception as e:
+        print(f"[recall] 待抽取队列清理失败: {e}")
+
+    # 2) 关键词事件表：内容出自这句话、且是这一轮（时间窗内）才删
+    try:
+        events = user_memory.get("events") or []
+        kept = [e for e in events
+                if not (str(e.get("content", "")) and str(e["content"]) in text
+                        and now - float(e.get("time", 0)) <= RECALL_CLEANUP_WINDOW)]
+        counts["events"] = len(events) - len(kept)
+        if counts["events"]:
+            user_memory["events"] = kept
+            save_memory_events(kept)
+    except Exception as e:
+        print(f"[recall] 关键词事件清理失败: {e}")
+
+    # 3) 记忆库：按原话清事实/情节（含值回滚），内部自带锁与落盘
+    try:
+        counts["bank"] = memory_bank.forget_by_source(text)
+    except Exception as e:
+        print(f"[recall] 记忆库清理失败: {e}")
+
+    # 4) 该轮创建的提醒：任务词出自这句话、chat 来源、时间窗内的待触发项
+    #    thing 可能被 LLM 改写（如剥掉"明天下午三点提醒我"后拼接前后文），
+    #    不是原消息的连续子串——放宽为 bigram 覆盖率 ≥0.8（与 forget_by_source
+    #    的 _span_covers 同思路）；短 thing（<6字）仍要求完全包含，防误删。
+    def _thing_from_text(thing, text):
+        if not thing:
+            return False
+        if thing in text:
+            return True
+        if len(thing) < 6:
+            return False
+        g = _char_ngrams(thing)
+        return bool(g) and len(g & _char_ngrams(text)) / len(g) >= 0.8
+
+    try:
+        for r in reminder_store.pending():
+            thing = str(r.get("thing", ""))
+            if (r.get("source") == "chat" and _thing_from_text(thing, text)
+                    and now - float(r.get("created", 0)) <= RECALL_CLEANUP_WINDOW):
+                if reminder_store.cancel(r["id"], reason="recalled"):
+                    counts["reminders"] += 1
+    except Exception as e:
+        print(f"[recall] 提醒清理失败: {e}")
+
+    print(f"[recall] 撤回清除完成: {counts}")
+    return counts
+
 # ========== 对话核心逻辑 ==========
 def extract_text(content):
     """提取纯文本（兼容 Gradio 的 str / {'text': ...} / [{'type': 'text', ...}, ...] 等嵌套格式）"""
@@ -1144,6 +1271,21 @@ def extract_text(content):
     if isinstance(content, dict): return extract_text(content.get("text", ""))
     if isinstance(content, (list, tuple)): return "".join(extract_text(c) for c in content if c)
     return ""
+
+# ========== 本地 3B 模型乱语兜底（2026-10-31 真机联调发现） ==========
+# 本地模型偶发复读训练语料而非对话：photo 场景吐 plotly.js 代码、
+# 闲聊吐"培训证书申请流程"。检测：中文占比过低或带代码特征的输出
+# 不算对话，丢弃后走 DeepSeek 重生成；无 key 时落到通用兜底话术。
+_GIBBERISH_CODE_RE = re.compile(r"function\s|var\s|=>|\{[a-z]|</|https?://|;\s*\n", re.I)
+
+def _is_gibberish(text):
+    text = str(text or "").strip()
+    if not text:
+        return False
+    cn = sum(1 for ch in text if '\u4e00' <= ch <= '\u9fff')
+    if cn / len(text) < 0.3:
+        return True
+    return bool(_GIBBERISH_CODE_RE.search(text))
 
 def chat_response(user_input, chat_history, surname, gender, is_muted, personality, conv_id, dropdown):
     global last_user_interaction_time
@@ -1179,12 +1321,17 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         base_prompt = PROMPT_PRACTICAL
     # 称呼强约束：小模型聊到"孙子"等词时易顺嘴叫错性别（爷爷↔奶奶），
     # 显式给出性别+正例+禁令；本地/DeepSeek 两条生成路径共用此 system
+    # 反馈11（⑤⑧⑨⑩）：风格硬约束 + 人格示例 + 医疗边界 + ASR 容错 + 情绪话术
     wrong_call = "奶奶" if gender == "女" else "爷爷"
-    system_content = (base_prompt +
-                      f"\n【称呼规则】你陪伴的是一位{'女' if gender == '女' else '男'}性老人，"
-                      f"全程只能称呼TA「{call_name}」"
-                      f"（例如：{call_name}，您今天气色真好），"
-                      f"绝对不能把TA叫成「{wrong_call}」。")
+    system_content = (base_prompt + STYLE_RULES
+                      + PERSONA_EXAMPLES.get(personality, "")
+                      + "\n" + MEDICAL_SAFETY_PROMPT
+                      + "\n" + ASR_TOLERANCE_PROMPT
+                      + "\n" + EMOTION_STYLE.get(emo["label"], EMOTION_STYLE["neutral"]))
+    system_content += (f"\n【称呼规则】你陪伴的是一位{'女' if gender == '女' else '男'}性老人，"
+                       f"全程只能称呼TA「{call_name}」"
+                       f"（例如：{call_name}，您今天气色真好），"
+                       f"绝对不能把TA叫成「{wrong_call}」。")
 
     # 记忆检索（三因子：新近性×重要性×相关性）移到下方"模型通道决定"之后按通道注入：
     # DeepSeek 用全量（4 事实+2 经历+1 反思），本地 3B 减半（2+1）——小模型记太多会念出来
@@ -1265,23 +1412,39 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             )
 
     # 模型通道决定：历史 > LONG_HIST_TURNS 轮 或 带搜索资料 → DeepSeek；否则本地 3B
-    use_deepseek = bool(search_context) or _model is None or len(internal_history) > LONG_HIST_TURNS * 2
+    # 照片场景强制走 DeepSeek：视觉识别已联网，本地 3B 对"看照片"语境
+    # 实测既慢（CPU 生成 30s+，photo 端到端 40s 导致前端超时）又爱吐乱语
+    use_deepseek = (str(user_input).startswith("【我给您看张照片")
+                    or bool(search_context) or _model is None
+                    or len(internal_history) > LONG_HIST_TURNS * 2)
     mem_ctx = memory_bank.build_chat_context(
         user_input, k_facts=(4 if use_deepseek else 2), k_episodes=(2 if use_deepseek else 1))
     if mem_ctx:
         system_content += f"\n{mem_ctx}"
 
+    # 反馈9（任务①）：时间型提问（"前两天发生了什么事"）注入对应日期区间的情节，
+    # 回答只讲那些日期的事——非时间型提问返回空串，零开销
+    time_ctx = memory_bank.build_time_context(user_input)
+    if time_ctx:
+        system_content += f"\n{time_ctx}"
+
+    # 任务⑨：健康问题注入本地知识库 top-3 常识（离线可用，先于联网搜索）
+    if health_kb.is_health_query(user_input):
+        kb_ctx = health_kb.retrieve_context(user_input)
+        if kb_ctx:
+            system_content += f"\n{kb_ctx}"
+
     bot_reply = ""
+    msgs = [{"role": "system", "content": system_content}]
+    if history_summary:
+        msgs.append({"role": "system",
+                     "content": f"【之前对话摘要】\n{history_summary}"})
+    msgs += internal_history[-RECENT_MSGS:] + \
+           [{"role": "user", "content": user_input + search_context}]
     if use_deepseek:
         # DeepSeek 结合搜索资料回答（本地 3B 难以可靠利用搜索结果）；
         # 本地模型缺失/加载失败时整体降级 DeepSeek——"模型不需要本地训练，能调用就行"
         try:
-            msgs = [{"role": "system", "content": system_content}]
-            if history_summary:
-                msgs.append({"role": "system",
-                             "content": f"【之前对话摘要】\n{history_summary}"})
-            msgs += internal_history[-RECENT_MSGS:] + \
-                   [{"role": "user", "content": user_input + search_context}]
             bot_reply = deepseek_chat_msgs(msgs)
         except Exception as e:
             print(f"DeepSeek调用失败: {e}")
@@ -1308,6 +1471,16 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
             bot_reply = bot_reply.strip().strip("[]").strip("{}").strip(",").strip()
             if not bot_reply or len(bot_reply) < 5:
                 bot_reply = f"{call_name}，我听着呢，您说。"
+            # 乱语兜底：本地模型复读训练语料（代码/网页文本）而非对话时，
+            # 丢弃换 DeepSeek 重生成；无 key 时落到下方通用兜底话术
+            if bot_reply and len(bot_reply) >= 5 and _is_gibberish(bot_reply):
+                print(f"[乱语兜底] 本地模型输出异常，降级DeepSeek | 原文: {bot_reply[:50]}")
+                bot_reply = ""
+                if DEEPSEEK_API_KEYS:
+                    try:
+                        bot_reply = deepseek_chat_msgs(msgs)
+                    except Exception as e:
+                        print(f"DeepSeek重生成失败: {e}")
             # Bug⑥a修复：不再每轮 torch.cuda.empty_cache()。依据 vLLM/PagedAttention
             # (Kwon et al., SOSP 2023)——稳态单进程推理显存占用稳定，缓存分配器
             # 本就在进程内复用已释放块；empty_cache 会向驱动归还并同步设备，
@@ -1365,7 +1538,8 @@ def play_reply_audio(chat_history, is_muted):
         content = extract_text(last.get("content", "")).strip()
         if content:
             voice = PERSONA_VOICE.get(UI_STATE["personality"])
-            speed = EMOTION_SPEED.get(UI_STATE["last_emotion"], 0.8)
+            # 反馈11（任务③）：默认语速 0.9；英文/中文情绪键双兜底
+            speed = EMOTION_SPEED.get(UI_STATE["last_emotion"], EMOTION_SPEED_DEFAULT)
             return text_to_speech(content, voice_type=voice, speed=speed)
     return None
 
@@ -1685,17 +1859,45 @@ def try_handle_reminder(user_input):
         if reply is not None:
             return reply
 
-    # 2) 已触发提醒的确认/稍后（只拦截短句，避免误伤正常聊天）
+    # 2) 已触发提醒的确认/稍后/不做（只拦截短句，避免误伤正常聊天）
+    #    反馈10（任务②）：完成与不做都当天不再催；"别念叨了"也算完成
     awaiting = reminder_store.awaiting_confirm(now, CONFIRM_WINDOW)
     if awaiting and len(str(user_input).strip()) <= 20:
         act = match_confirmation(user_input)
         if act == "done":
             r = awaiting[0]
-            reminder_store.confirm(r["id"], now)
+            reminder_store.close_for_today(r["id"], now, reason="spoken")
             return confirm_ack_message(persona, call, r["thing"])
+        if act == "wont":
+            r = awaiting[0]
+            reminder_store.close_for_today(r["id"], now, reason="wont")
+            return wont_ack_message(persona, call, r["thing"])
         if act == "later":
             reminder_store.snooze(awaiting[0]["id"], 600, now)
             return later_ack_message(call, 10)
+
+    # 2.5) 反馈10（任务②）：提醒还没到点，老人先说"喝了/弄好了/不喝了"——
+    #      同样当天关掉，别到点再催一遍（短句+无时间回指+事项词命中才拦，防误伤）
+    _t = str(user_input).strip()
+    if len(_t) <= 15 and not re.search(r"上次|昨天|前天|之前|那天|每天|以后", _t):
+        act = match_confirmation(_t)
+        if act in ("done", "wont"):
+            _today = datetime.fromtimestamp(now).date()
+            pend_today = [r for r in reminder_store.pending(now)
+                          if datetime.fromtimestamp(r["time"]).date() <= _today]
+            hit = None
+            for r in pend_today:
+                thing = str(r.get("thing", ""))
+                if thing and (thing[:2] in _t or thing[:1] in _t):
+                    hit = r
+                    break
+            if hit is None and len(pend_today) == 1:
+                hit = pend_today[0]     # 只有一个今日到期且老人明确说办完/不做：直接关
+            if hit is not None:
+                reminder_store.close_for_today(
+                    hit["id"], now, reason=("spoken" if act == "done" else "wont"))
+                return (confirm_ack_message(persona, call, hit["thing"]) if act == "done"
+                        else wont_ack_message(persona, call, hit["thing"]))
 
     # 3) 新意图：关键词预过滤，命中才解析（普通聊天零额外开销）。
     #    Bug③：先拦截抱怨/质问句式（"你还不提醒我"是责备不是设提醒指令），道歉并补提醒；
@@ -1722,10 +1924,10 @@ def try_handle_reminder(user_input):
             return list_message(call, [])
         cands = _filter_by_target(pend, data.get("target"))
         if len(cands) == 1:
+            # 反馈10（任务②）："取消XX提醒"立即生效并复述确认，不再反问一遍
             desc = describe_reminder(cands[0], datetime.now())
-            pending_reminder.update({"kind": "confirm_cancel",
-                                     "data": {"rid": cands[0]["id"], "desc": desc}, "ts": now})
-            return confirm_cancel_message(call, desc)
+            reminder_store.cancel(cands[0]["id"], reason="spoken")
+            return cancel_ack_message(persona, call, desc)
         pending_reminder.update({"kind": "select_cancel",
                                  "data": {"ids": [r["id"] for r in cands]}, "ts": now})
         return select_message(call, [describe_reminder(r, datetime.now()) for r in cands], "取消")
@@ -2016,9 +2218,10 @@ def handle_reminder_action(action):
     except ValueError:
         return get_reminders_panel_html(), render_sidebar_cards()
     if verb == "done":
-        reminder_store.confirm(rid, time.time())
+        # 反馈10（任务②）：按钮操作带 reason 落盘，与语音通道同源可追溯
+        reminder_store.confirm(rid, time.time(), reason="button")
     elif verb == "cancel":
-        reminder_store.cancel(rid)
+        reminder_store.cancel(rid, reason="button")
     return get_reminders_panel_html(), render_sidebar_cards()
 
 # 启动调度线程（daemon：随主进程退出）
@@ -2168,6 +2371,60 @@ backup_file(MEMORY_BANK_FILE)
 PROMPT_PRACTICAL = "你是小忆，一位踏实稳重、真诚靠谱的晚辈。说话温和耐心，用简短自然的口语。"
 PROMPT_HUMOR = "你是小忆，一位活泼开朗、风趣俏皮的晚辈。语气轻松欢快，说话带一点小俏皮。"
 PROMPT_CARING = "你是小忆，一位温柔细腻、共情暖心的晚辈。语气温柔舒缓，善于倾听与安抚。"
+
+# ========== 反馈11：提示词工程（任务⑤⑧⑨⑩） ==========
+# 任务⑤：风格硬约束——短句、口语、不反问、不罗列（去"人机感"的根）
+STYLE_RULES = """
+【说话方式（必须遵守）】
+- 一次最多说两句，每句不超过20个字，像家里人唠嗑。
+- 全程口语，禁用书面词："此外、首先、其次、总之、建议您、需要注意的是"都不许出现。
+- 不许反问老人（"您觉得呢？""您说是不是？"禁用），不许给老人出选择题。
+- 不许列条目（1234、破折号罗列、冒号清单都禁用），想到什么说什么。
+- 不说"作为一个AI/助手"，你就是小忆，是家里的晚辈。
+"""
+# 任务⑤：三人格口语示例（few-shot——老人实际对话风格）
+PERSONA_EXAMPLES = {
+    "踏实务实": """
+【学我说话】
+老人：我孙子好久没来了。
+你：工作忙呢，年轻人顾不上。回头让他回来吃顿饭呗。
+老人：今天血压有点高。
+你：别急，先坐下歇会儿。药按时吃着呢吧？
+""",
+    "风趣幽默": """
+【学我说话】
+老人：我孙子好久没来了。
+你：这小子，准是忙糊涂啦。您想他了就打个电话，吓他一跳。
+老人：今天血压有点高。
+你：哟，它又调皮了。坐下喝口水，药吃着呢就稳当。
+""",
+    "暖心知心": """
+【学我说话】
+老人：我孙子好久没来了。
+你：想他了吧，很正常。要不给他发个语音，他准开心。
+老人：今天血压有点高。
+你：我陪着您呢，别担心。先坐会儿，药吃过了吧？
+""",
+}
+# 任务⑩：情绪话术——按当轮情绪（low/neutral/high）注入指令+示例
+EMOTION_STYLE = {
+    "low": ("【老人现在情绪低落】多安抚、少说教：先接住情绪再说话，"
+            "陪他慢慢聊，不开玩笑、不讲大道理。像这样——老人：唉，活着没意思。"
+            "你：您这么说，我心里也难受。跟我说说，我听着呢。"),
+    "neutral": "【老人情绪平稳】正常聊天，语气放松自然就好。",
+    "high": ("【老人现在心情不错】可以顺着他的高兴劲儿聊，轻轻开个玩笑，但别过火。"
+             "像这样——老人：我孙子考上大学啦！你：哎哟，大喜事！这孩子真有出息！"),
+}
+# 任务⑧：ASR 语义容错——同音错别字容忍
+ASR_TOLERANCE_PROMPT = ("【语音识别提示】老人的话来自语音识别，可能有同音错别字"
+                        "（比如\"降压要\"其实是\"降压药\"、\"孙志\"其实是\"孙子\"），"
+                        "按发音理解意思就好，别纠结错字，更别复述错字。")
+# 任务⑨：医疗安全边界
+MEDICAL_SAFETY_PROMPT = ("【健康话题安全边界】聊到症状、用药、看病时："
+                         "1.只给生活上的提醒和宽慰，不下诊断、不推荐新药、不给具体剂量；"
+                         "2.情况听着严重（胸口疼、头晕摔倒、说话不清）时，马上劝他打120"
+                         "或叫家里人，语气要肯定不许犹豫；"
+                         "3.老人正在吃的药可以提，没听他说过的药不提。")
 
 # ========== 主动关怀引擎（五信号→三道闸仲裁→记忆话题→人格话术→反馈闭环，见 proactive.py） ==========
 # 与 reminder.py 的分工：reminder 管"到点必响、确认闭环"的确定性事务；

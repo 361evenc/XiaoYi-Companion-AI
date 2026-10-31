@@ -53,6 +53,16 @@ FACT_MED = json.dumps([
      "importance": 8, "confidence": 0.95},
 ], ensure_ascii=False)
 
+FACT_GRANDSON_V2 = json.dumps([
+    {"field": "家庭", "key": "孙子的名字", "value": "毛毛", "quote": "我孙子叫毛毛",
+     "importance": 7, "confidence": 0.9},
+], ensure_ascii=False)
+
+FACT_GRANDSON_AGAIN = json.dumps([
+    {"field": "家庭", "key": "孙子的名字", "value": "豆豆", "quote": "孙子还是豆豆",
+     "importance": 6, "confidence": 0.9},
+], ensure_ascii=False)
+
 
 class TmpBank(unittest.TestCase):
     def setUp(self):
@@ -263,6 +273,71 @@ class TestRetrievalAndForgetting(TmpBank):
     def test_build_chat_context_empty(self):
         bank = self.make()
         self.assertEqual(bank.build_chat_context("你好", now=self.clock()), "")
+
+
+class TestRecallForgetBySource(TmpBank):
+    """反馈2/任务⑥：撤回——按原话清除该消息引发的记忆，撤掉的话不许留在记忆里"""
+
+    def test_span_covers(self):
+        self.assertTrue(MemoryBank._span_covers("我孙子叫豆豆", "我孙子叫豆豆，可乖了。"))
+        self.assertTrue(MemoryBank._span_covers("我孙子叫豆豆。", "我孙子叫豆豆。"))
+        # 相似但非片段（同句式换值，覆盖率 0.6 < 0.75）：不算同一句
+        self.assertFalse(MemoryBank._span_covers("我孙子叫豆豆。", "我孙子叫毛毛。"))
+        # 短词必须完全包含，避免误删
+        self.assertFalse(MemoryBank._span_covers("豆豆", "我孙子叫毛毛。"))
+        self.assertFalse(MemoryBank._span_covers("", "随便说"))
+        self.assertFalse(MemoryBank._span_covers("豆豆", ""))
+
+    def test_recall_deletes_episode_and_new_fact(self):
+        llm = ScriptedLLM([FACT_GRANDSON])
+        bank = self.make(llm=llm)
+        msg = "我孙子叫豆豆，可乖了。"
+        bank.observe(msg, "")
+        self.assertEqual(len(bank.episodes), 1)
+        self.assertTrue(any(f["value"] == "豆豆" for f in bank.facts))
+        counts = bank.forget_by_source(msg)
+        self.assertEqual(counts["episodes"], 1)
+        self.assertEqual(counts["facts_deleted"], 1)
+        self.assertEqual(bank.facts, [])
+        self.assertEqual(bank.episodes, [])
+
+    def test_recall_rolls_back_updated_fact(self):
+        llm = ScriptedLLM([FACT_GRANDSON, FACT_GRANDSON_V2])
+        bank = self.make(llm=llm)
+        bank.observe("我孙子叫豆豆。", "")
+        self.clock.advance(3600)
+        bank.observe("我孙子叫毛毛。", "")
+        fact = next(f for f in bank.facts if f["value"] == "毛毛")
+        self.assertTrue(fact["history"])          # 第二轮是更新，旧值进了历史
+        counts = bank.forget_by_source("我孙子叫毛毛。")
+        self.assertEqual(counts["facts_rolled_back"], 1)
+        self.assertEqual(counts["episodes"], 1)   # 只删第二轮的情节
+        self.assertEqual(fact["value"], "豆豆")   # 回滚到第一轮的值
+        self.assertEqual(len(bank.episodes), 1)
+
+    def test_recall_keeps_fact_supported_by_other_rounds(self):
+        llm = ScriptedLLM([FACT_GRANDSON, FACT_GRANDSON_AGAIN])
+        bank = self.make(llm=llm)
+        bank.observe("我孙子叫豆豆。", "")
+        self.clock.advance(3600)
+        bank.observe("孙子还是豆豆，没改名。", "")
+        fact = next(f for f in bank.facts if f["value"] == "豆豆")
+        self.assertEqual(len(fact["quotes"]), 2)  # 两轮各留一条原话
+        counts = bank.forget_by_source("孙子还是豆豆，没改名。")
+        self.assertEqual(counts["facts_unquoted"], 1)
+        self.assertEqual(counts["facts_deleted"], 0)
+        self.assertTrue(any(f["value"] == "豆豆" for f in bank.facts))
+        self.assertEqual(fact["quotes"], ["我孙子叫豆豆"])
+
+    def test_recall_keeps_unrelated_memories(self):
+        llm = ScriptedLLM([FACT_MED])
+        bank = self.make(llm=llm)
+        bank.observe("我有高血压。", "")
+        self.clock.advance(3600)
+        counts = bank.forget_by_source("我孙子叫豆豆。")   # 撤回的是别的话
+        self.assertEqual(sum(counts.values()), 0)
+        self.assertTrue(any(f["value"] == "高血压" for f in bank.facts))
+        self.assertEqual(len(bank.episodes), 1)
 
 
 class TestReflection(TmpBank):

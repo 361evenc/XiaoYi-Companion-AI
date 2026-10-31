@@ -39,13 +39,14 @@ import os
 import re
 import threading
 import time as _time
-from datetime import datetime
+from datetime import datetime, timedelta
 
 __all__ = [
     "MemoryBank", "FIELDS", "FIELD_INFO", "keyword_extract", "similarity",
     "retrievability", "parse_llm_facts", "parse_json_strings",
     "humanize_ago", "classify_confirm_reply",
     "SYMPTOM_VARIANTS", "match_symptoms",
+    "parse_time_range", "humanize_day", "_boost_important",
 ]
 
 # ---------------------------------------------------------------- 字段表（老年场景定制）
@@ -438,6 +439,85 @@ def keyword_extract(text, now=None):
 
     return out[:3]
 
+# ---------------------------------------------------------------- 时间型提问（反馈9）
+# 客户贴的对话：问"前两天发生了什么事"，小忆反复拿今天的事回答。
+# 根因：记忆注入只认"字面相似"，时间型提问（前两天/上周）匹配不到任何记忆，
+# 小忆手里没料，只能拿最近上下文硬答。这里把口语时间词解析成"日期区间"，
+# 区间内的情节 + 1 条重要事件单独注入，并且"过去类"区间不含今天。
+
+TIME_QUERY_PATTERNS = [
+    # (正则, 区间)  区间 = 相对今天的日期偏移闭区间 (start, end)，end<0 表示不含今天
+    (re.compile(r"大前天"), (-3, -3)),
+    (re.compile(r"前天"), (-2, -2)),
+    (re.compile(r"前两天|前几天|前些天|这之前"), (-3, -1)),
+    (re.compile(r"昨天|昨儿|昨晚|昨天晚上"), (-1, -1)),
+    (re.compile(r"上个?星期|上个?礼拜"), "last_week"),
+    (re.compile(r"上个月"), (-60, -1)),
+    (re.compile(r"最近|最近几天|这几天|这阵子|这几回"), (-3, 0)),
+]
+
+TIME_QUERY_MAXLEN = 40   # 超过此长度的多为叙述而非提问，不做时间注入
+
+
+def parse_time_range(text, now=None):
+    """时间型提问 -> (start_off, end_off, 时间词)；非时间型提问返回 None。
+    start/end 为相对今天的日期偏移（天），闭区间；end=0 表示含今天。"""
+    t = str(text or "").strip()
+    if not t or len(t) > TIME_QUERY_MAXLEN:
+        return None
+    for pat, rng in TIME_QUERY_PATTERNS:
+        m = pat.search(t)
+        if not m:
+            continue
+        if rng == "last_week":
+            today = datetime.fromtimestamp(now or _time.time()).date()
+            this_monday = today - timedelta(days=today.weekday())
+            last_monday = this_monday - timedelta(days=7)
+            last_sunday = this_monday - timedelta(days=1)
+            return ((last_monday - today).days, (last_sunday - today).days, m.group(0))
+        return (rng[0], rng[1], m.group(0))
+    return None
+
+
+def humanize_day(ts, now=None):
+    """时间戳 -> 老人友好的日期说法：今天/昨天/前天/X月X号"""
+    now = now or _time.time()
+    d = datetime.fromtimestamp(ts).date()
+    today = datetime.fromtimestamp(now).date()
+    delta = (d - today).days
+    if delta == 0:
+        return "今天"
+    if delta == -1:
+        return "昨天"
+    if delta == -2:
+        return "前天"
+    if delta == 1:
+        return "明天"
+    return d.strftime("%m月%d号")
+
+
+# ---------------------------------------------------------------- 重要事件加权（反馈9 完整版）
+# 生日、成绩、大病、家庭大事：重要性提到 8-10 分、衰减放慢到 60 天以上，
+# 告别"生日前一天说的，今天就记不住"。
+IMPORTANT_EVENT_RE = re.compile(
+    r"生日|寿辰|过大寿|忌日|纪念日|结婚|金婚|银婚|钻石婚|去世|走了|病逝"
+    r"|住院|开刀|手术|化疗|放疗|透析|出院|急救|大病|骨折"
+    r"|成绩|考试|考了|考上|升学|高考|中考|得奖|获奖|金榜题名"
+    r"|添丁|添了个|生了个|抱上|四世同堂|当兵|入伍|搬家|乔迁|退休")
+
+IMPORTANT_EVENT_MIN_IMP = 8
+IMPORTANT_EVENT_MIN_STRENGTH_DAYS = 60.0
+
+
+def _boost_important(raw_facts):
+    """命中的重要事件 importance 提到 >=8（调用方据此放慢衰减）。"""
+    for f in raw_facts:
+        blob = f"{f.get('field', '')}{f.get('key', '')}{f.get('value', '')}{f.get('quote', '')}"
+        if IMPORTANT_EVENT_RE.search(blob):
+            f["importance"] = max(int(f.get("importance", 5)), IMPORTANT_EVENT_MIN_IMP)
+    return raw_facts
+
+
 # ---------------------------------------------------------------- 主动确认（人设话术）
 
 CONFIRM_COOLDOWN = 1800.0   # 全局冷却：两次主动确认至少间隔30分钟
@@ -464,11 +544,12 @@ def classify_confirm_reply(text):
     return (None, None)
 
 def confirm_question(persona, call, key, value):
+    # 反馈12（任务⑤）：确认从考试式问句改为自然带出，老人听着不打断
     if persona == "风趣幽默":
-        return f"哎{call}，考考我记性——您说过{key}是{value}，我没记错吧？"
+        return f"哎{call}，我这脑子灵光着呢——{key}是{value}，记得门儿清！"
     if persona == "暖心知心":
-        return f"{call}，我一直记着呢，您说过{key}是{value}，是这么说的吧？"
-    return f"对了{call}，跟您对个事儿——您之前说{key}是{value}，我没记错吧？"
+        return f"{call}，您跟我说过{key}是{value}，我一直记在心里呢。"
+    return f"对了{call}，我记着呢，您之前提过{key}是{value}。"
 
 def confirm_yes_ack(persona, call, key, value):
     if persona == "风趣幽默":
@@ -599,6 +680,8 @@ class MemoryBank:
                 print(f"[memory] LLM抽取失败，降级关键词: {e}")
         if not raw:
             raw = keyword_extract(user_text, now)
+        # 反馈9 完整版：生日/成绩/大病/家庭大事重要性提到 >=8（衰减随 _add_fact 放慢）
+        raw = _boost_important(raw)
         # Bug⑤a：值溯源校验——抽取值必须能在老人原话里找到，找不到视为编造，丢弃（留日志供评测统计）
         grounded = []
         for f in raw:
@@ -628,7 +711,11 @@ class MemoryBank:
                 "quote": user_text[:60],
                 "field": raw[0]["field"],
                 "ts": now, "importance": imp_max,
-                "strength": _strength_days(imp_max, is_fact=False),
+                # 反馈9：重要事件情节的衰减同样放慢（>=8 分至少 60 天）
+                "strength": (max(_strength_days(imp_max, is_fact=False),
+                                 IMPORTANT_EVENT_MIN_STRENGTH_DAYS)
+                             if imp_max >= IMPORTANT_EVENT_MIN_IMP
+                             else _strength_days(imp_max, is_fact=False)),
                 "recall_count": 0, "last_recall": now,
             }
             self.episodes.append(ep)
@@ -665,7 +752,11 @@ class MemoryBank:
                 "quotes": [quote] if quote else [],
                 "ts": now, "first_ts": now,
                 "confidence": confidence, "importance": importance,
-                "strength": _strength_days(importance, is_fact=True),
+                # 反馈9：生日/成绩/大病/家庭大事等高重要事实，衰减至少 60 天
+                "strength": (max(_strength_days(importance, is_fact=True),
+                                 IMPORTANT_EVENT_MIN_STRENGTH_DAYS)
+                             if importance >= IMPORTANT_EVENT_MIN_IMP
+                             else _strength_days(importance, is_fact=True)),
                 "recall_count": 0, "last_recall": now,
                 "history": [], "ask_count": 0,
             }
@@ -724,6 +815,76 @@ class MemoryBank:
             if removed:
                 self._save()
             return removed
+
+    # ---- 撤回清除（反馈2/任务⑥：撤掉的话不许留在记忆里）----
+    @staticmethod
+    def _span_covers(quote, text):
+        """quote 是否是 text 里的一个片段（原话溯源匹配）。
+        quote 本就是从老人原话里截的 ≤60 字 span，用 bigram 覆盖率 ≥0.75 判定，
+        容忍 LLM 抽取时少许改写；同句式换值（"叫豆豆"vs"叫毛毛"覆盖率 0.6）
+        不会误判；quote 太短（<4 字）要求完全包含，避免误删。"""
+        quote, text = str(quote or "").strip(), str(text or "").strip()
+        if not quote or not text:
+            return False
+        if quote in text:
+            return True
+        if len(quote) < 4:
+            return False
+        gq = _char_ngrams(quote)
+        if not gq:
+            return False
+        return len(gq & _char_ngrams(text)) / len(gq) >= 0.75
+
+    def forget_by_source(self, user_text):
+        """按"原话来源"清除一条消息引发的记忆（撤回用）。
+
+        - 情节：quote 是该消息前 60 字 → 覆盖即删
+        - 事实：quotes 里命中该消息的引语剔除；剔完后
+          有 history → 回滚到上一个值（该轮只是更新）；
+          无 history → 整条删（该轮新建）
+        返回 {"episodes": n, "facts_deleted": n, "facts_rolled_back": n, "facts_unquoted": n}
+        """
+        counts = {"episodes": 0, "facts_deleted": 0,
+                  "facts_rolled_back": 0, "facts_unquoted": 0}
+        with self._lock:
+            eps_keep = [e for e in self.episodes
+                        if not self._span_covers(e.get("quote", ""), user_text)]
+            counts["episodes"] = len(self.episodes) - len(eps_keep)
+            self.episodes = eps_keep
+
+            facts_keep = []
+            for f in self.facts:
+                quotes = f.get("quotes") or []
+                kept_q = [q for q in quotes
+                          if not self._span_covers(q, user_text)]
+                if len(kept_q) == len(quotes):
+                    facts_keep.append(f)      # 与该消息无关
+                    continue
+                if kept_q:
+                    f["quotes"] = kept_q      # 还有别的轮次支撑，只摘引语
+                    counts["facts_unquoted"] += 1
+                    facts_keep.append(f)
+                    continue
+                if f.get("history"):
+                    prev = f["history"].pop()   # 回滚到该轮更新前的值
+                    f["value"] = prev.get("value", f.get("value", ""))
+                    f["ts"] = prev.get("ts", f.get("ts", 0))
+                    f["quotes"] = [prev["quote"]] if prev.get("quote") else []
+                    counts["facts_rolled_back"] += 1
+                    facts_keep.append(f)
+                else:
+                    counts["facts_deleted"] += 1   # 该轮新建的事实：整条删
+            self.facts = facts_keep
+
+            # 清掉指向已删事实的待确认/进行中确认，防止撤回后还追问
+            live_ids = {f["id"] for f in self.facts}
+            self.pending_confirms = [c for c in self.pending_confirms
+                                     if c["fact_id"] in live_ids]
+            if self.active_confirm and self.active_confirm["fact_id"] not in live_ids:
+                self.active_confirm = None
+            if any(counts.values()):
+                self._save()
+            return counts
 
     # ---- 检索（三因子）----
     REL_SIM_SCALE = 0.10   # 轻量相似度→[0,1] 的饱和尺度：明显相关≈0.10+，对齐 embedding 余弦量纲
@@ -823,6 +984,43 @@ class MemoryBank:
             lines.append("[你最近对老人的了解]")
             for r in refl:
                 lines.append(f"- {r['text']}")
+        return "\n".join(lines)
+
+    # ---- 反馈9（任务①）：时间型提问专用上下文 ----
+    def build_time_context(self, query, k_episodes=3, now=None):
+        """"前两天发生了什么事"这类时间型提问：注入该日期区间内的情节（最多3条）
+        + 1 条重要事件，并带"昨天/前天"式日期标签；回答限定在这些日期内，
+        杜绝拿今天的事硬答。非时间型提问返回空串（调用方不必预判）。"""
+        parsed = parse_time_range(query, now=now)
+        if not parsed:
+            return ""
+        start_off, end_off, time_word = parsed
+        now = now or self.clock()
+        today = datetime.fromtimestamp(now).date()
+        d0, d1 = today + timedelta(days=start_off), today + timedelta(days=end_off)
+        with self._lock:
+            in_range = [e for e in self.episodes
+                        if retrievability(e, now) >= FORGET_THRESHOLD
+                        and d0 <= datetime.fromtimestamp(e.get("ts", 0)).date() <= d1]
+            in_range.sort(key=lambda e: (-e.get("importance", 0), -e.get("ts", 0)))
+            picked = in_range[:k_episodes]
+            extra = next((e for e in in_range if e.get("importance", 0) >= 7
+                          and id(e) not in {id(p) for p in picked}), None)
+            if extra:
+                picked.append(extra)
+            for m in picked:
+                _reinforce(m, now)
+            self._save()
+        if not picked:
+            return (f"[老人问的是“{time_word}”的事。你那几天没有留下任何记录，"
+                    "就如实说记不太清了，千万别拿今天的事凑数。]")
+        mid = lambda d: datetime(d.year, d.month, d.day, 12).timestamp()
+        span = (humanize_day(mid(d0), now) if d0 == d1
+                else f"{humanize_day(mid(d0), now)}到{humanize_day(mid(d1), now)}")
+        lines = [f"[老人问的是“{time_word}”（{span}）发生的事。回答只讲下面这些日期的事，"
+                 "别掺今天的内容，记不清的就直说。]"]
+        for e in picked:
+            lines.append(f"- {humanize_day(e.get('ts', 0), now)}：{e['text']}")
         return "\n".join(lines)
 
     # ---- 反思升华 ----
@@ -1015,20 +1213,48 @@ class MemoryBank:
 
     # ---- 任务3：画像导出到 用户画像.txt（后台静默更新，不占界面） ----
     def export_profile_txt(self, path, name=""):
-        """把当前画像快照写进 txt 文件，格式：字段：值（每行一项，同字段多项用、分隔）。
-        越用越全：记忆库每次更新后由调用方触发重写。失败只打日志不影响主流程。"""
+        """画像导出（反馈11/任务⑦：只增不删）——旧 txt 里已有的条目不因记忆库
+        删除而消失。读旧文件解析"字段：值、值"→ 与新快照 union 去重 →
+        旧字段保序在前，旧值在前新值在后。失败只打日志不影响主流程。"""
         try:
             snap = self.profile_snapshot()
-            lines = []
-            if name:
-                lines.append(f"姓名：{name}")
+            new_map = {}
             for field, items in snap.items():
                 vals = []
                 for it in items[:6]:
-                    v = (it["value"] if it["key"] == it["value"]
-                         else f"{it['key']}：{it['value']}")
-                    vals.append(v)
+                    vals.append(it["value"] if it["key"] == it["value"]
+                                else f"{it['key']}：{it['value']}")
                 if vals:
+                    new_map[field] = vals
+            # 1) 解析旧文件（往返格式与写出对称：首冒号切字段、、分隔多值）
+            old_fields, old_order = {}, []
+            if os.path.exists(path):
+                try:
+                    with open(path, "r", encoding="utf-8") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line or "：" not in line or line.startswith("姓名"):
+                                continue
+                            field, _, rest = line.partition("：")
+                            field = field.strip()
+                            vals = [v.strip() for v in rest.split("、") if v.strip()]
+                            if field and vals:
+                                old_fields[field] = vals
+                                old_order.append(field)
+                except Exception:
+                    old_fields, old_order = {}, []
+            # 2) union 合并：旧字段保序在前；同字段旧值在前、新值追加去重
+            lines = []
+            if name:
+                lines.append(f"姓名：{name}")
+            for field in old_order:
+                merged = list(old_fields[field])
+                for v in new_map.get(field, []):
+                    if v not in merged:
+                        merged.append(v)
+                lines.append(f"{field}：{'、'.join(merged)}")
+            for field, vals in new_map.items():
+                if field not in old_fields:
                     lines.append(f"{field}：{'、'.join(vals)}")
             content = "\n".join(lines) + ("\n" if lines else "")
             tmp = f"{path}.{os.getpid()}_{threading.get_ident()}.tmp"

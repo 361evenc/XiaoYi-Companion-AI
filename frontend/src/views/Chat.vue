@@ -164,12 +164,36 @@ function handleChatResponse(d) {
   playAudio(d.audio_url, replyText)
 }
 
+// 发送前压缩：手机原图动辄 5-10MB（base64 后更大），上传慢且识别链路
+// 实测 40s+ 必超时；压到长边 1280 / JPEG 75% 后体积降一个量级，识别精度足够
+function compressImage(base64, maxSide = 1280, quality = 0.75) {
+  return new Promise((resolve) => {
+    try {
+      const img = new Image()
+      img.onload = () => {
+        const scale = Math.min(1, maxSide / Math.max(img.width, img.height))
+        if (scale >= 1) return resolve(base64)   // 本来就小，不压
+        const canvas = document.createElement('canvas')
+        canvas.width = Math.round(img.width * scale)
+        canvas.height = Math.round(img.height * scale)
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height)
+        resolve(canvas.toDataURL('image/jpeg', quality).split(',')[1])
+      }
+      img.onerror = () => resolve(base64)   // 压缩失败用原图，别挡着发不出
+      img.src = `data:image/jpeg;base64,${base64}`
+    } catch (e) {
+      resolve(base64)
+    }
+  })
+}
+
 // 拍照/上传图片：发给后端 → 存记忆箱 + 视觉识别 + 注入对话
 async function onPhoto({ base64, mime }) {
   if (loading.value) return
   loading.value = true
   error.value = ''
   try {
+    base64 = await compressImage(base64)
     const res = await api.photo({
       photo_base64: base64,
       mime: mime || 'image/jpeg',

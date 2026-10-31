@@ -20,6 +20,8 @@ def _ts(y=2026, mo=10, d=4, h=12, mi=0, s=0):
 
 class ProactiveTestBase(unittest.TestCase):
     def setUp(self):
+        # init 覆盖全局 _P 前先快照，tearDown 还原（见 tearDown 注释）
+        self._saved_p = dict(proactive._P)
         self.tmp = tempfile.mkdtemp(prefix="pro_test_")
         self.events = []
         self.profile = {}
@@ -54,6 +56,11 @@ class ProactiveTestBase(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+        # 防跨套件污染：setUp 的 proactive.init 会覆盖全局 _P，跑完必须还原，
+        # 否则组合跑（本套件在 test_bug_fixes_app 之前执行）时 _P 里残留
+        # 本测试实例的闭包，bugfixes 的主动关怀用例读到空事件全部静默
+        proactive._P.clear()
+        proactive._P.update(self._saved_p)
 
     def _state(self):
         return proactive._load_state()

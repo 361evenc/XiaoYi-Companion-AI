@@ -248,11 +248,15 @@ class TestCrossSessionGreeting(unittest.TestCase):
         chat_history, _id, _u = app.new_conversation()
         self.assertIn("按时吃", chat_history[0]["content"])
 
-    def test_enter_chat_includes_greeting(self):
+    def test_setup_includes_greeting(self):
+        # 旧版 Gradio enter_chat 已下线；等价入口是 FastAPI 的 chat_service.setup
         seed_fact("健康", "膝盖疼", "膝盖疼", ts=YESTERDAY)
-        out = app.enter_chat("张", "女", "踏实务实", True)
-        welcome = out[6]
-        self.assertIn("好点没", welcome[0]["content"])
+        from backend.services import chat_service   # 首次导入会把 CWD 切到项目根
+        try:
+            out = chat_service.setup("张", "女", "踏实务实", True)
+        finally:
+            os.chdir(TMP)   # 恢复临时目录，保持本套测试的数据隔离
+        self.assertIn("好点没", out["reply"])
 
 
 # ---------------------------------------------------- 顺带："忘了吧"真删记忆
@@ -307,6 +311,90 @@ class TestForgetByRequest(unittest.TestCase):
         ai_services.forget_by_request("把降压药的事忘了吧", [], app.memory_bank, "张奶奶")
         self.assertEqual(app.memory_bank.pending_confirms, [])
         self.assertIsNone(app.memory_bank.active_confirm)
+
+
+# ---------------------------------------------------- 任务⑥：消息撤回真删记忆
+class TestRecallMessage(unittest.TestCase):
+    def setUp(self):
+        reset_state()
+        os.chdir(TMP)   # 数据文件全部落临时目录
+
+    def tearDown(self):
+        # chat_service 内部（backend.core.config import）会把 CWD 切到项目根，
+        # 不恢复的话组合跑后续套件（proactive/bugfixes）会读写到真实数据目录
+        os.chdir(TMP)
+
+    def test_recall_removes_round_and_cleans_memory(self):
+        from backend.services import chat_service
+        conv_id = "recall-test"
+        msg = "三点提醒我找老花镜，老花镜就放在门口抽屉"
+        app.save_conversation(conv_id, [
+            {"role": "user", "content": msg},
+            {"role": "assistant", "content": "好嘞，三点提醒您找老花镜。"},
+        ])
+        # 该轮已抽进记忆库（quote 是原话片段）+ 关键词事件 + 该轮建的提醒
+        app.memory_bank.facts.append({
+            "id": "f1", "field": "物品", "key": "老花镜位置", "value": "门口抽屉",
+            "quotes": ["老花镜就放在门口抽屉"], "ts": time.time(), "first_ts": time.time(),
+            "confidence": 0.9, "importance": 6, "strength": 30.0,
+            "recall_count": 0, "last_recall": time.time(), "history": [], "ask_count": 0})
+        app.memory_bank.episodes.append({
+            "id": "e1", "text": "老花镜位置是门口抽屉",
+            "quote": msg, "field": "物品",
+            "ts": time.time(), "importance": 6, "strength": 30.0,
+            "recall_count": 0, "last_recall": time.time()})
+        app.user_memory["events"] = [
+            {"type": "health", "content": "高血压", "time": time.time(), "status": "active"},
+            {"type": "item", "content": "老花镜", "time": time.time(), "status": "active"}]
+        app.reminder_store.add("找老花镜", time.time() + 3600, source="chat")
+
+        out = chat_service.recall(conv_id)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["message"], "好嘞，刚那句不算哈～")   # 固定回复，不调模型
+        # 返回历史与对话文件里：这一轮都删掉，只剩撤回确认
+        self.assertEqual([(m["role"], m["content"]) for m in out["chat_history"]],
+                         [("assistant", "好嘞，刚那句不算哈～")])
+        msgs, _ = app.get_conversation_messages_by_id(conv_id)
+        self.assertEqual([m["content"] for m in msgs], ["好嘞，刚那句不算哈～"])
+        # 撤掉的话不许留在记忆里：事实/情节/该轮事件/该轮提醒全清
+        self.assertEqual(app.memory_bank.facts, [])
+        self.assertEqual(app.memory_bank.episodes, [])
+        self.assertEqual([e["content"] for e in app.user_memory["events"]], ["高血压"])
+        self.assertEqual(app.reminder_store.pending(), [])
+
+    def test_recall_empty_conversation(self):
+        from backend.services import chat_service
+        out = chat_service.recall("no-such-conv")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["chat_history"], [])
+
+    def test_recall_cleans_reworded_reminder_and_keeps_old(self):
+        """LLM 改写过的 thing（非连续子串）也能清；时间窗外的同类提醒不误删。
+        真机联调发现：thing="我孙子叫豆豆，去社区医院拿药" 出自
+        "我孙子叫豆豆，明天下午三点提醒我去社区医院拿药"——剥掉时间短语
+        拼接前后文，纯 in 判定漏掉，提醒残留在待触发列表。"""
+        msg = "我孙子叫豆豆，明天下午三点提醒我去社区医院拿药"
+        app.reminder_store.add("我孙子叫豆豆，去社区医院拿药",   # 改写拼接（bug 现场）
+                               time.time() + 7200, source="chat")
+        app.reminder_store.add("去社区医院拿药",                  # 连续子串
+                               time.time() + 3600, source="chat")
+        old = app.reminder_store.add("去社区医院拿药",           # 同类但 2 小时前建的
+                                     time.time() + 5400, source="chat")
+        old["created"] = time.time() - 7200
+        app.reminder_store._save()
+
+        counts = app.recall_cleanup({"role": "user", "content": msg})
+
+        self.assertEqual(counts["reminders"], 2)   # 改写的 + 子串的都清
+        self.assertEqual(len(app.reminder_store.pending()), 1)   # 时间窗外的保留
+        self.assertEqual(app.reminder_store.pending()[0]["thing"], "去社区医院拿药")
+
+    def test_recall_reminder_short_thing_not_fuzzy_matched(self):
+        """短 thing（<6字）不做模糊匹配，只认完全包含——防误删别人的提醒。"""
+        app.reminder_store.add("量血压", time.time() + 3600, source="chat")
+        counts = app.recall_cleanup({"role": "user", "content": "明天下午三点提醒我去社区医院拿药"})
+        self.assertEqual(counts["reminders"], 0)   # "量血压"与原话无关，不清
+        self.assertEqual(len(app.reminder_store.pending()), 1)
 
 
 if __name__ == "__main__":
