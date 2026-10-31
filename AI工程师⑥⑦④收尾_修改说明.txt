@@ -1,0 +1,146 @@
+AI工程师任务 ⑥⑦④ 收尾 + 回归修复 · 修改说明
+============================================================
+生成时间：2026-10-31
+对应清单：《小忆项目——各成员任务清单（10.23反馈重新分配版）》AI工程师 10 项
+
+一、任务状态总览（本次收尾后）
+------------------------------------------------------------
+① 记忆时间混淆      已完成（此前完成：时间词→日期区间注入 + 重要事件加权）
+② 提醒闭环          已完成（此前完成 + 本次修复 B8 迟来确认回归）
+③ 语音中断/语速     已完成（此前完成：重试2次/合并整文件/情绪语速）
+④ 拍照识别          代码此前已就位；本次预置 local_secrets.json 三项配置，
+                    只差百炼 key（外部申请，见 local_secrets_修改说明.txt）
+⑤ 人机感/风格       已完成（此前完成：风格硬约束+三人格示例）
+⑥ 撤回后端逻辑      本次完成（原为占位钩子）
+⑦ 画像/记忆分开     本次收尾（记忆箱接口不再返回画像字段）
+⑧ ASR 兜底          已完成（此前完成：热词+纠错表+语义容错）
+⑨ 健康知识库        已完成（此前完成：health_kb top-3 注入）
+⑩ 心情话术          已完成（此前完成：情绪→指令+示例注入）
+
+二、任务⑥：撤回后端逻辑（反馈2）
+------------------------------------------------------------
+1. memory_system.py
+   - MemoryBank 新增 forget_by_source(user_text)：按"原话来源"清除
+     - 情节：quote 覆盖该消息即删
+     - 事实：命中引语剔除；剔完还有别的轮次支撑→只摘引语；
+       有 history→回滚到上一值；无 history→整条删（该轮新建）
+   - _span_covers()：引语是否为该消息片段（子串或 bigram 覆盖率≥0.75；
+     <4 字必须完全包含）。同句式换值（"叫豆豆"vs"叫毛毛"）不会误删
+
+2. app.py
+   - 新增 recall_cleanup(removed_user_msg)：撤回后同步清四类痕迹
+     a. 后台待抽取队列 _memory_queue（防撤回后又被异步写入）
+     b. 关键词事件表（内容出自该话 + 15 分钟时间窗内才删，防误删早前同类）
+     c. 记忆库 forget_by_source（含值回滚）
+     d. 该轮创建的提醒（chat 来源 + thing 出自该话 + 15 分钟窗，reason=recalled）
+   - 用户画像.txt 按⑦"只增不删"是长期资产，不在撤回清除范围
+
+3. backend/services/chat_service.py
+   - recall()：删最后一轮（对话文件+返回历史，下一轮上下文自然不含）
+     → 调 engine.recall_cleanup → 固定回「好嘞，刚那句不算哈～」写进
+     当前对话，不调模型
+   - 前端契约不变：{ok, message, conv_id, chat_history}，历史整体替换
+
+4. ai_services.py
+   - 删除 recall_message / vision_recognize 两个占位钩子（已被真实现取代）
+
+三、任务⑦收尾：画像与记忆彻底分开（反馈11）
+------------------------------------------------------------
+- backend/services/memory_service.py box()：不再返回 profile 字段
+  （前端 Memory.vue 早已不渲染；接口层也彻底去掉，画像只在 用户画像.txt）
+
+四、任务④收尾：拍照识别配置（反馈1）
+------------------------------------------------------------
+- local_secrets.json 新增：
+    VISION_API_BASE = https://dashscope.aliyuncs.com/compatible-mode/v1（已预填）
+    VISION_API_KEY  = 已于 2026-10-31 贴入用户申请的百炼 key
+    VISION_MODEL    = qwen3-vl-plus（原 qwen-vl-plus 已被百炼下线）
+- key 未到位自动降级：照片照存记忆箱，如实说"暂时认不出"，不报错
+- 2026-10-31 真机联调：key 认证有效，但账号尚未开通视觉模型服务
+  （AccessDenied.Unpurchased），待控制台"模型广场→qwen3-vl-plus→
+  开通服务"后即可用，代码无需再改；app.py 默认模型名已同步为
+  qwen3-vl-plus
+- 2026-10-31 开通后端到端复验：/api/photo 全链路通——存记忆箱 →
+  qwen3-vl-plus 识别准确（测试图"红圆+绿方"描述正确）→ 注入对话 →
+  回复正常（"张奶奶，我看看啊。红的圆的，绿的方的，挺清楚的。"）
+
+五之三、本地 3B 模型乱语兜底（2026-10-31 真机联调发现并修复）
+------------------------------------------------------------
+- 现象：photo 场景 reply 吐 plotly.js 代码；闲聊偶吐"培训证书
+  申请流程"网页体文本——本地 3B 模型复读训练语料而非对话
+- 修复（app.py）：新增 _is_gibberish（中文占比<0.3 或命中代码
+  特征 function/var /=> / </ / http 等）；本地模型输出判定为
+  乱语时丢弃，改走 DeepSeek 重生成（msgs 提到分支外复用），
+  无 key 时落通用兜底话术。DeepSeek 分支行为不变
+- 回归：care + bugfixes + proactive 80 例全绿
+
+五之四、图片发送失败修复（2026-10-31，前端超时 + 生成链路提速 20 倍）
+------------------------------------------------------------
+- 现象：前端发图"照片发送失败"，但后端日志 photo 全 200、
+  照片实际都存进了记忆箱——纯前端 axios 30s 超时先报错
+- 根因一（体积）：手机原图 5-10MB（base64 后更大），传输+识别慢
+- 根因二（生成）：本地 3B CPU 生成占 30s+，photo 端到端实测 43.5s
+- 修复（三处）：
+  1. frontend Chat.vue：发送前 canvas 压缩（长边 1280/JPEG 75%），
+     9MB → 348KB（识别精度足够，压缩失败回退原图）
+  2. frontend api/index.js：photo 单独 timeout 120s 兜底
+  3. app.py chat_response：【我给您看张照片 前缀强制走 DeepSeek
+     （视觉识别已联网，生成用 DeepSeek 快且稳；本地 3B 对该语境
+     实测爱吐文档体乱语）
+- 效果：photo 端到端 43.5s → 2.2s（压缩图实测），回复正常
+- 回归：care + bugfixes + proactive + memory 134 例全绿
+
+五、回归修复（ reminder.py ，上期任务②遗留）
+------------------------------------------------------------
+- close_for_today：log[-1] 为 "missed"（升级记录后）时迟来确认
+  "吃了/喝了" 也能记 done（B8 用例：迟来确认仍记完成）
+- awaiting_confirm：已回完成/不做（done/wont）的升级项不再挂 in
+  待确认列表（前端✅按钮列表不会残留已办事项）
+
+五之二、撤回提醒残留 Bug（2026-10-31 真机联调发现并修复）
+------------------------------------------------------------
+- 现象：撤回"我孙子叫豆豆，明天下午三点提醒我去社区医院拿药"后，
+  提醒 thing="我孙子叫豆豆，去社区医院拿药" 残留在待触发列表
+- 原因：LLM 抽取 thing 时剥掉时间短语拼接前后文，得到的不是
+  原消息的连续子串，recall_cleanup 纯 in 判定漏掉
+- 修复（app.py recall_cleanup 第4步）：thing 判定放宽为
+  "连续子串 或 bigram 覆盖率≥0.8"（与 forget_by_source 的
+  _span_covers 同思路，_char_ngrams 自 memory_system 引入）；
+  短 thing（<6字）仍要求完全包含，时间窗/来源条件不变，防误删
+- test_care_features.py +2：改写 thing 能清 + 时间窗外同类保留；
+  短 thing 无关提醒不清
+- 修复后真机复验：撤回 → 提醒零残留，52 天前历史记忆完好
+
+六、测试（全量 210 例全绿）
+------------------------------------------------------------
+- test_memory_system.py +12：TestRecallForgetBySource
+  （span 覆盖判定 / 删情节+新事实 / 更新回滚 / 多轮支撑只摘引语 / 无关保留）
+- test_care_features.py +4：TestRecallMessage 端到端冒烟
+  （撤一轮→历史/对话文件只剩固定回复；事实/情节/该轮事件/该轮提醒全清）
+  + 提醒改写清理 2 例（五之二）
+- test_reminder_integration.py：B11 解包改为 5 值
+  （poll_reminder_events 加 sidebar_cards 后测试未跟上，非新 Bug）
+- test_care_features.py：enter_chat 已随 Gradio 下线，改测
+  chat_service.setup 等价入口（带 CWD 恢复，保持临时目录隔离）
+- 运行结果：memory 54 + reminder 55 + integration 21 + care 32
+  + proactive 22 + bugfixes 26 = 210 全部 OK
+
+六之二、测试基建修复（2026-10-31，六套件组合跑暴露）
+------------------------------------------------------------
+此前分批跑（care 排最后）掩盖了跨套件污染，六套件一次组合跑
+（memory→reminder→integration→care→proactive→bugfixes）暴露
+bugfixes 主动关怀 5 例失败，两处独立污染源：
+- test_proactive：ProactiveTestBase.setUp 每用例 proactive.init
+  覆盖全局 _P 且不还原——最后残留本套件测试实例的闭包
+  （get_keyword_events/get_profile/weather stub 等），后续套件
+  读到空事件/假天气。修复：setUp 快照 _P、tearDown 还原。
+- test_care_features：TestRecallMessage 用例调 chat_service 后
+  CWD 停在项目根（backend.core.config import 时 chdir），后续
+  套件读写到真实数据目录。修复：tearDown 恢复临时目录。
+修复后任意组合顺序全绿（189 组合 + 21 集成单跑 = 210）。
+
+七、验证方式（复跑）
+------------------------------------------------------------
+venv\Scripts\python -m unittest test_memory_system test_reminder
+venv\Scripts\python -m unittest test_proactive test_bug_fixes_app test_care_features
+venv\Scripts\python test_reminder_integration.py

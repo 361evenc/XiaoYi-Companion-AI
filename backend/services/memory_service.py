@@ -51,9 +51,10 @@ def wipe(is_muted=False):
 
 
 def box():
-    """记忆箱数据：重要事件时间线 + 照片 + 小忆的理解（反思）+ 用户画像。
+    """记忆箱数据：重要事件时间线 + 照片 + 小忆的理解（反思）。
 
-    返回 {events[], photos[], reflections[], profile}，供记忆页渲染。
+    反馈11/任务⑦：用户画像与记忆彻底分开——画像只进 用户画像.txt（工作人员
+    打开文件看），不再进记忆箱展示结构。返回 {events[], photos[], reflections[]}。
     """
     # 重要事件：importance>=7 的情节（与旧版面板 ⭐ 同一标准），最近 10 条
     try:
@@ -81,15 +82,7 @@ def box():
     except Exception:
         reflections = []
 
-    # 用户画像文本
-    profile = ""
-    try:
-        with open(engine.PROFILE_TXT_FILE, encoding="utf-8") as f:
-            profile = f.read().strip()
-    except Exception:
-        pass
-
-    return {"events": events, "photos": photos, "reflections": reflections, "profile": profile}
+    return {"events": events, "photos": photos, "reflections": reflections}
 
 
 def emotion_chart():

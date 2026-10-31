@@ -399,13 +399,26 @@ def fallback_extract(text):
     return {"intent": intent, "time": time_expr, "thing": thing, "target": ""}
 
 
-DONE_RE = re.compile(r"吃了|服了|喝完|喝好|吃完|吃好|办完|办好|做完|做好|完成|睡醒|搞定|弄好")
+# 反馈10（任务②）：完成/不做的口语识别——哪怕带"别念叨了"也算完成，两种当天都不再催
+DONE_RE = re.compile(
+    r"吃了|服了|喝了|喝完|喝好|喝过|吃过|吃完|吃好|办完|办好|做完|做好|完成"
+    r"|睡醒|搞定|弄好|知道了|晓得了|记着了|行了|好啦|妥了")
+WONT_RE = re.compile(
+    r"不喝了|不吃了|不做了|不去了|不用了|不行了|不喝啦|不吃啦"
+    r"|今天不喝|今天不吃|今天不去|取消吧|别提醒了|不用提醒|不要了"
+    r"|先不喝了|先不吃了|先不喝|先不吃")
 LATER_RE = re.compile(r"还没|没有呢|等会|待会|稍后|再等等|过会|先不")
+NAG_RE = re.compile(r"别念叨|别唠叨|别催了|别再提|别再问|知道了知道了|烦不烦")
 
 
 def match_confirmation(text):
-    """触发后的用户回复分类：done=已办 / later=稍后 / None"""
+    """触发后的用户回复分类：done=已办 / later=稍后 / wont=不做了 / None
+    顺序：不做 > 别念叨(算done) > 稍后 > 完成（"我不行了"须先被 wont 拦下）"""
     t = str(text or "")
+    if WONT_RE.search(t):
+        return "wont"
+    if NAG_RE.search(t):
+        return "done"
     if LATER_RE.search(t):
         return "later"
     if DONE_RE.search(t):
@@ -595,6 +608,15 @@ def cancel_ack_message(personality, call, desc):
     return f"好，已经取消了：{desc}。"
 
 
+def wont_ack_message(personality, call, thing):
+    # 反馈10（任务②）：老人说"不喝了/不做了"——不再催，话术不评判不劝导
+    if personality == "风趣幽默":
+        return f"好嘞{call}，那就不提啦，想起来了随时叫我。"
+    if personality == "暖心知心":
+        return f"好嘞{call}，那就不提啦，您自己心里有数就行。"
+    return f"好嘞{call}，那就不提啦。"
+
+
 def abort_message(call):
     return f"好的{call}，那先不动它。"
 
@@ -694,11 +716,13 @@ class ReminderStore:
         return sorted([r for r in self.items if r["status"] == "scheduled"],
                       key=lambda x: x["time"])
 
-    def cancel(self, rid):
+    def cancel(self, rid, reason="spoken"):
         r = self.get(rid)
         if not r or r["status"] != "scheduled":
             return False
         r["status"] = "canceled"
+        # 反馈10（任务②）：取消原因落盘（spoken=口头 / button=点按钮）
+        r["cancel_reason"] = str(reason or "spoken")
         r["updated"] = self.clock()
         with self._lock:
             self._save()
@@ -770,7 +794,9 @@ class ReminderStore:
                 continue
             entry = r["log"][-1]
             recent = (now - r.get("last_fired_at", 0)) < window
-            if recent and (entry["result"] == "pending" or entry.get("escalated")):
+            # 升级后仍等"迟来确认"（missed）；一旦老人回完成/不做（done/wont）就不再等
+            if recent and (entry["result"] == "pending"
+                           or (entry.get("escalated") and entry["result"] == "missed")):
                 out.append(r)
         out.sort(key=lambda x: x.get("last_fired_at", 0), reverse=True)
         return out
@@ -803,7 +829,7 @@ class ReminderStore:
                 self._save()
         return events
 
-    def confirm(self, rid, now=None):
+    def confirm(self, rid, now=None, reason="spoken"):
         now = now or self.clock()
         r = self.get(rid)
         if not r or not r.get("log"):
@@ -812,12 +838,55 @@ class ReminderStore:
         if entry["result"] != "done":
             entry["result"] = "done"
             entry["confirmed"] = now
+            # 反馈10（任务②）：完成方式落盘（spoken=口头说完成 / button=点按钮）
+            entry["reason"] = str(reason or "spoken")
         if r["status"] == "fired":
             r["status"] = "done"
         r["updated"] = now
         with self._lock:
             self._save()
         return True
+
+    def close_for_today(self, rid, now=None, reason="spoken"):
+        """反馈10（任务②）：完成/不做了——当天不再催。
+        - 触发后待确认（log[-1] pending）：log 记 done + reason
+        - fired（一次性已触发未确认）：直接 done
+        - 一次性 scheduled（还没响）：办完了就 done
+        - 周期 scheduled（今天还会响）：推到明天的下一次
+        返回 True 表示状态有变化。"""
+        now = now or self.clock()
+        r = self.get(rid)
+        if not r:
+            return False
+        now_dt = datetime.fromtimestamp(now)
+        tomorrow = now_dt + timedelta(days=1)
+        changed = False
+        # pending=触发后待确认；missed=升级记录后迟来确认（B8：仍记完成）
+        if r.get("log") and r["log"][-1].get("result") in ("pending", "missed"):
+            r["log"][-1]["result"] = "done"
+            r["log"][-1]["confirmed"] = now
+            r["log"][-1]["reason"] = str(reason or "spoken")
+            changed = True
+        if r["status"] == "fired":
+            r["status"] = "done"
+            changed = True
+        elif r["status"] == "scheduled":
+            end_of_today = tomorrow.replace(hour=0, minute=0, second=0,
+                                            microsecond=0).timestamp()
+            if r["time"] <= end_of_today:
+                if r.get("repeat"):
+                    nxt = _next_occurrence(r["repeat"], tomorrow)
+                    if nxt:
+                        r["time"] = nxt.timestamp()
+                        changed = True
+                else:
+                    r["time"] += 24 * 3600
+                    changed = True
+        if changed:
+            r["updated"] = now
+            with self._lock:
+                self._save()
+        return changed
 
     def snooze(self, rid, delta, now=None):
         now = now or self.clock()

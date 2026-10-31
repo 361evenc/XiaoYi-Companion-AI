@@ -166,7 +166,7 @@ def run():
             store.mark_fired(r['id'], time.time())
             ns['reminder_queue'].append(
                 {"message": trigger_message("暖心知心", "王爷爷", r["thing"])})
-        chat, audio, panel, mempanel = ns['poll_reminder_events']([], True, 'it-conv')
+        chat, audio, panel, mempanel, cards = ns['poll_reminder_events']([], True, 'it-conv')
         check(len(chat) == 1 and '吃药' in chat[0]['content']
               and saved and saved[-1][0] == 'it-conv',
               "B11 到点入队->轮询推进聊天+落库")

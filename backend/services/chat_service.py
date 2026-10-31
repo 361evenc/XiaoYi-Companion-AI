@@ -12,7 +12,6 @@ import os
 import tempfile
 import time
 
-import ai_services
 from backend.core.state import engine
 from backend.services import voice_service
 
@@ -134,11 +133,15 @@ def photo(photo_base64, mime="image/jpeg", chat_history=None, surname="", gender
     return chat(user_text, chat_history, surname, gender, is_muted, personality, conv_id)
 
 
-def recall(conv_id):
-    """撤回当前对话的最后一轮（user + assistant），并调用钩子清除该消息引发的记忆。
+RECALL_ACK = "好嘞，刚那句不算哈～"   # 反馈2/任务⑥：撤回固定回复，不调模型
 
-    ai_services.recall_message 是占位（返回 None），无替代回复；
-    返回更新后的 chat_history 供前端整体替换。
+
+def recall(conv_id):
+    """撤回当前对话的最后一轮（user + assistant）。
+
+    - 对话文件与返回的 chat_history 同步删掉这一轮（下一轮模型上下文自然不含）
+    - 调 engine.recall_cleanup 清掉该消息引发的记忆/意图痕迹（事件/记忆库/待抽取队列/该轮提醒）
+    - 固定回一句 RECALL_ACK，不调模型
     """
     if not conv_id:
         return {"ok": False, "message": "还没有可撤回的消息。", "conv_id": conv_id,
@@ -163,16 +166,18 @@ def recall(conv_id):
             break
 
     if conv is not None and removed_user is not None:
+        # 任务⑥：同步清掉该消息引发的记忆/画像/意图痕迹
+        try:
+            engine.recall_cleanup(removed_user)
+        except Exception as e:
+            print(f"[chat_service] 撤回记忆清除失败: {e}")
+        # 撤回确认作为小忆的话写进当前对话（固定文案，不调模型）
+        msgs.append({"role": "assistant", "content": RECALL_ACK})
         conv["messages"] = msgs
         try:
             engine.save_json_safe(engine.HISTORY_FILE, convs)
         except Exception as e:
             print(f"[chat_service] 撤回保存失败: {e}")
-        # 钩子：彻底清除该消息引发的记忆/画像痕迹（现为占位，返回 None）
-        try:
-            ai_services.recall_message(conv_id, removed_user)
-        except Exception:
-            pass
     # 转成前端用的 [{role, content}]
     history = []
     for m in msgs:
@@ -180,7 +185,7 @@ def recall(conv_id):
         history.append({"role": m.get("role", "user") if isinstance(m, dict) else "user",
                          "content": engine.extract_text(content)})
     return {"ok": removed_user is not None,
-            "message": "撤回好啦。" if removed_user is not None else "没有可撤回的消息。",
+            "message": RECALL_ACK if removed_user is not None else "没有可撤回的消息。",
             "conv_id": conv_id, "chat_history": history}
 
 
