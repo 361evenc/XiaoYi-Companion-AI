@@ -53,7 +53,9 @@ def retrieve_context(query, top_k=3):
     picked = [d for d in scored if similarity(q, d.get("text", "")) > 0][:top_k]
     if not picked:
         return ""
-    lines = ["[健康常识参考（用一两句口语自然带出来，别照本宣科，别一次全说完）]"]
+    # 2026-10-31：老人明确问健康时要说全（客户反馈"医学知识没体现"），
+    # 不再强制"一两句带过"
+    lines = ["[健康常识参考（用口语自然带出来，别照本宣科；老人问得细就把相关的都说全）]"]
     for d in picked:
         lines.append(f"- {d['text']}")
     return "\n".join(lines)
