@@ -68,3 +68,12 @@ uploads/
 # 前端构建依赖与产物（npm install / build 生成）
 node_modules/
 dist/
+
+# ===== B-11 微信语音呼叫（2026-11-07） =====
+# 紧急联系人（真实姓名+电话，隐私数据）
+emergency_contact.json
+# 呼叫防打错人的标题参考图（含联系人名）
+wechat_refs/
+# UI 自动化库运行日志 / 工具元数据
+@AutomationLog.txt
+.workbuddy/

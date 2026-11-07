@@ -155,7 +155,7 @@ class TestCallTrigger(unittest.TestCase):
                        "给我女儿打电话", "帮我打电话给孩子"):
             store.contact and None
             res = store.request_call(target="contact",
-                                     caller=lambda p: True, now=clock())
+                                     caller=lambda p, n="": True, now=clock())
             self.assertEqual(res["status"], "dialing")
             hits += 1
         self.assertEqual(hits, 10)
@@ -199,7 +199,7 @@ class TestCallFailure(unittest.TestCase):
         store.resolve_confirm("对")
         attempts = []
 
-        def failing_caller(phone):
+        def failing_caller(phone, name=""):
             attempts.append(phone)
             return False                      # 永远失败
 
@@ -219,7 +219,7 @@ class TestCallFailure(unittest.TestCase):
         store.resolve_confirm("对")
         calls = {"n": 0}
 
-        def flaky(phone):
+        def flaky(phone, name=""):
             calls["n"] += 1
             return calls["n"] > 1
 
@@ -233,7 +233,7 @@ class TestCallFailure(unittest.TestCase):
         store.submit("小明", PHONE, relation="儿子")
         store.resolve_confirm("对")
 
-        def boom(phone):
+        def boom(phone, name=""):
             raise RuntimeError("通道断了")
 
         res = store.request_call(target="contact", caller=boom, now=clock())
@@ -290,7 +290,7 @@ class TestPersistence(unittest.TestCase):
         store.resolve_confirm("对")
         store.daily_nudge_due()
         store.request_call(target="contact",
-                           caller=lambda p: False)      # 失败也记日志
+                           caller=lambda p, n="": False)      # 失败也记日志
         store2 = EmergencyContactStore(path=path, clock=clock)
         self.assertEqual(store2.get()["name"], "小明")
         self.assertTrue(store2.call_log)

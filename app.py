@@ -1171,6 +1171,15 @@ if _n_migrated:
 # 登记三路径（老人自报/子女代填/上门代填）+ 逐位复述确认 + 主动呼叫 + 失败无静默
 emergency_contact_store = EmergencyContactStore("emergency_contact.json")
 
+# 呼叫通道注入：桌面微信语音拉起（依赖/窗口缺失时 wechat_voice_call 返回 False，
+# store 层自动走"您自己打"兜底话术，绝不静默）
+try:
+    from backend.services.wechat_caller import wechat_voice_call as _wx_call
+    emergency_contact_store.set_caller(_wx_call)
+    print("📞 紧急联络呼叫通道：微信语音（已接入）")
+except Exception as _e:
+    print(f"📞 紧急联络呼叫通道：未接入（{_e}），呼叫走诚实降级")
+
 # 记忆抽取队列：聊天返回后再后台抽取，不拖慢回复速度
 _memory_queue = deque()
 

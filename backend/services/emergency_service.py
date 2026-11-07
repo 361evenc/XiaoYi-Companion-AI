@@ -6,9 +6,9 @@ MVP 呼叫通道 = caller callable（微信语音/电话 app 拉起），通道�
 """
 from backend.core.state import engine
 
-# caller 通道占位：MVP 阶段未接微信/电话 app，先 None（诚实降级）。
-# 接通时替换为 lambda phone: wechat_dial(phone) 之类的真实通道即可。
-_CALLER = None
+# caller 通道：桌面微信语音拉起（B-11 注入位已接通）。
+# 依赖/微信窗口缺失时 wechat_voice_call 返回 False，store 层诚实降级兜底话术。
+from backend.services.wechat_caller import wechat_voice_call as _CALLER
 
 
 def _store():

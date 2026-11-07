@@ -2064,7 +2064,12 @@ class EmergencyContactStore:
         self.pending = None
         self.call_log = []
         self._last_nudge_ts = 0.0
+        self._caller = None            # 呼叫通道 callable（wechat_caller 注入）；None=诚实降级
         self._load()
+
+    def set_caller(self, fn):
+        """注入呼叫通道 caller(phone, name)->bool（B-11：微信语音拉起等）；None 恢复降级"""
+        self._caller = fn
 
     # ---- 持久化（原子写，防断电损坏）----
     def _load(self):
@@ -2197,7 +2202,7 @@ class EmergencyContactStore:
         """发起呼叫请求（MVP：电脑呼叫通道由 caller callable 执行，如微信语音拉起）。
         - target="contact"：打给紧急联系人
         - target="120"：老人要打 120 —— MVP 不自主拨，返回诚实话术让他自己按
-        caller(phone)->bool 执行实际呼叫，失败/超时 → 重试 1 次 → 仍失败 →
+        caller(phone, name)->bool 执行实际呼叫（电话通道用号，微信语音通道按名字搜索），失败/超时 → 重试 1 次 → 仍失败 →
         兜底播报（"自己再试/按120/喊隔壁"），呼叫全程写日志——绝不静默。"""
         now = now or self.clock()
         if target == "120":
@@ -2216,6 +2221,7 @@ class EmergencyContactStore:
                     "message": "您的紧急联系人还没设置呢，您先按120，"
                                "回头跟我说个电话号码，我记好帮您打。"}
         phone, name = contact["phone"], contact["name"]
+        caller = caller or self._caller     # 未显式传则用注入通道（口语入口与 API 共用）
         if caller is None:
             # 无呼叫通道（未接微信/电话 app）：诚实说明，不装打通
             with self._lock:
@@ -2231,7 +2237,7 @@ class EmergencyContactStore:
         for attempt in (1, 2):          # 失败 → 重试 1 次 → 兜底，绝不静默
             attempts = attempt
             try:
-                ok = bool(caller(phone))
+                ok = bool(caller(phone, name))   # 契约 caller(phone, name)：电话通道用号，微信通道用名
             except Exception as e:
                 msg = str(e)
             if ok:
