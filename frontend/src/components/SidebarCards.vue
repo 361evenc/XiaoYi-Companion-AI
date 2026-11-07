@@ -2,6 +2,14 @@
   <nav class="sidebar">
     <h2 class="sidebar-title">📚 我的小忆</h2>
 
+    <button class="nav-card" type="button" @click="$router.push('/call')">
+      <span class="nav-icon">📹</span>
+      <span class="nav-text">
+        <span class="nav-name">视频通话</span>
+        <span class="nav-sub">看着小忆说话</span>
+      </span>
+    </button>
+
     <button class="nav-card" type="button" @click="$router.push('/memory')">
       <span class="nav-icon">🧠</span>
       <span class="nav-text">
