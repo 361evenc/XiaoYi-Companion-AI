@@ -15,3 +15,7 @@ Pillow>=10
 
 # 仅 ⑤ CLIP 零样本需要，其余模块不必装（权重约 577MB）
 # open-clip-torch>=3.3
+
+# 仅 H-4 药品说明书识别需要（本地 OCR，不上云）。不装则 /api/photo 明确报 ocr_unavailable。
+# 选它不选 paddleocr：单依赖 onnxruntime（约 80MB），paddle 全家桶几百 MB 且与 numpy2 有冲突史。
+# rapidocr-onnxruntime>=1.4,<2
