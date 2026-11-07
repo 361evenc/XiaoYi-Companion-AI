@@ -47,6 +47,10 @@ __all__ = [
     "humanize_ago", "classify_confirm_reply",
     "SYMPTOM_VARIANTS", "match_symptoms",
     "parse_time_range", "humanize_day", "_boost_important",
+    "SCENE_LEXICON", "VISITOR_WORDS", "PET_WORDS",
+    "CORRECT_INTENT_RE", "OLD_VALUE_Q_RE",
+    "SENSITIVE_SCENES", "DEDUP_WINDOW_SECONDS", "VISUAL_HIGH_CONFIDENCE",
+    "EmergencyContactStore", "EMERGENCY_CALL_RE", "_extract_phone",
 ]
 
 # ---------------------------------------------------------------- 字段表（老年场景定制）
@@ -200,6 +204,11 @@ def _norm_key(key):
     # Bug⑤b：位置类键归一——"降压药放哪/药的位置/降压药存放" → "降压药位置"。
     # 依据：Fellegi & Sunter (1969) record linkage——同一实体的不同表述须归一到
     # 规范键再合并；_add_fact 的 (field,key) 冲突分支随即生效：新的覆盖旧的。
+    if k.endswith("位置"):
+        # 已是规范键：只剥"位置"前的"的"（"药的位置"→"药位置"），重跑归一会误伤
+        # （"放大镜位置"→"大镜位置"）
+        base = k[:-2].rstrip("的")
+        return (f"{base}位置" if base else k)[:12]
     if _LOCATION_KEY_RE.search(k):
         obj = _LOCATION_KEY_RE.sub("", k).rstrip("的")
         if obj:
@@ -583,7 +592,175 @@ def humanize_ago(ts, now):
         return f"{int(d // 3600)}小时前"
     if d < 30 * 86400:
         return f"{int(d // 86400)}天前"
-    return datetime.fromtimestamp(ts).strftime("%m月%d号")
+    d0 = datetime.fromtimestamp(ts)
+    return f"{d0.month}月{d0.day}号"   # 手拼：strftime 中文在 GB locale 终端会崩
+
+# ---------------------------------------------------------------- B-5：三维检索（按人/物/场景）+ 显式更正
+# 任务卡 B-5 口径（2026-11 分工）：
+#   - 检索维度按人/物/场景，复用 similarity()（bigram），不新建模型
+#   - 人物 MVP 只承诺三类（本人/访客/宠物）+ 人物档案；无档案的具名人物（"孙子"）
+#     退回"访客"类——F-4 兜底：只显"有客人来过"，绝不显示猜的人名（AI 不猜）
+#   - 场景字段 = H-2 帧的粗位置标签+家具标签（mem["scene"]，MVP 不做场景分类）；
+#     无标签时退 SCENE_LEXICON 同义词表 + bigram 相似度（"厨房"↔"做饭"靠词典补召回）
+#   - 显式更正："不叫豆豆叫毛毛" → 值更新 + 旧值入 history（可查，不是物理删）；
+#     新旧值规则：AI 回答一律用新值；老人问"之前叫啥"→ 答旧值+补"后来改成X了"
+
+SCENE_LEXICON = {
+    "客厅": ["客厅", "沙发", "茶几", "看电视"],
+    "厨房": ["厨房", "做饭", "烧菜", "炒菜", "烧水", "灶台", "锅", "洗碗"],
+    "卧室": ["卧室", "床上", "床头柜", "睡觉", "午睡", "被子"],
+    "卫生间": ["卫生间", "厕所", "洗手间", "洗澡", "洗漱"],
+    "阳台": ["阳台", "晾衣服", "晒被子", "浇花"],
+    "餐厅": ["餐厅", "餐桌", "吃饭"],
+}
+VISITOR_WORDS = ["客人", "来客", "来人", "有人来", "邻居", "保姆", "上门", "来访", "看望", "串门"]
+PET_WORDS = ["猫", "狗", "宠物", "小鸟", "金鱼", "鹦鹉", "乌龟", "鸟"]
+SELF_WORDS = ("我", "俺", "自己", "本人")
+_FAMILY_RELATION_RE = re.compile(
+    r"孙子|孙女|儿子|闺女|女儿|老伴|儿媳|儿媳妇|女婿|弟弟|妹妹|哥哥|姐姐|外孙")
+
+# 显式更正意图（确定性流程，不调模型）。只认两种最不易误触发的句式：
+#   ① "X不叫/别叫/不再叫OLD（了），叫/改成NEW"     ② "（把）X（的名字）改成/改为/改叫NEW"
+# 其余自然聊天里的纠正由 observe 的 LLM 抽取走 _add_fact 冲突分支，同样保留
+# history——两条路径殊途同归，本正则只是给最典型句式一条不依赖模型的高速路。
+CORRECT_INTENT_RE = re.compile(
+    r"(?P<thing0>[^\s，。,.！!？?；;]{0,8}?)(?:不叫|别叫|不再叫)"
+    r"(?P<old0>[^\s，。,.！!？?；;]{1,12}?)[了吗呢啊呀]*[，,。]?\s*"
+    r"(?:叫|改成|改为|改叫)(?P<new0>[^\s，。,.！!？?；;]{1,12})"
+    r"|(?:把)?(?P<thing1>[^\s，。,.！!？?；;]{1,8}?)"
+    r"(?:的名字|名字)?(?:改成|改为|改叫)(?P<new1>[^\s，。,.！!？?；;]{1,12})"
+)
+
+# 旧值问句："我孙子之前叫啥来着" → 答旧值 + 补"后来改成X了"（规则写死）
+OLD_VALUE_Q_RE = re.compile(
+    r"(?P<thing>[^\s，。,.！!？?；;]{0,8}?)"
+    r"(?:以前|之前|原先)(?:的名字|名字)?(?:叫|是)(?:什么|啥|啥呀|啥来着|啥了|什么呢)"
+)
+
+
+def _strip_pronoun(thing):
+    """更正/提问里的主语去掉称谓前缀："我孙子"→"孙子"、"把豆豆"→"豆豆"、"我家的猫"→"猫"。"""
+    t = re.sub(r"^(?:我们家|俺们家|咱家|我家|把|让|给|俺们|俺|我|咱)", "", str(thing or ""))
+    t = t.strip().strip("的").strip()
+    return t
+
+
+# ---------------------------------------------------------------- B-4：记忆写入规则（持续录制开闸前的"卫生标准"）
+# 任务卡 B-4 口径（2026-11 分工）：
+#   - 四类规则：什么记 / 什么不记 / 去重（同物同位置 30 分钟一条）/ 分级写入
+#   - 什么不记：第三方只记"有人来过"（只判是不是老人，不跑第三方人脸识别）；
+#     敏感场景默认拒写（装机 SOP 物理规避为主 + 区域标签拒写兜底）+ 免看清单口头配置
+#   - **重要边界**：免看清单/敏感区拒写只管视觉写入路径（ingest_visual_event），
+#     不管语音——老人亲口说的"我在卫生间摔了一跤"是健康事件必须记。
+#     摄像头有隐私边界，老人的嘴没有（他自己选择说的）。
+
+SENSITIVE_SCENES = ("卧室", "卫生间", "更衣", "厕所", "浴室", "洗手间", "洗澡间")
+DEDUP_WINDOW_SECONDS = 30 * 60       # 去重窗口：同物品+同动作+同位置 30 分钟内只写一条
+VISUAL_HIGH_CONFIDENCE = 0.8         # ≥0.8 进长期记忆（episodes）；<0.8 只进短期缓存
+SHORT_TERM_BUFFER_CAP = 50           # 低置信短期缓存滚动上限（不进记忆箱、检索不可见）
+
+# 免看清单口头配置（确定性流程，不调模型）：卧室/卫生间这类标准场景词归一后增删，
+# 认不出的说法（"电视别看了"）不接管，放行给正常聊天
+_IGNORE_ZONE_ADD_RE = re.compile(
+    r"(?:(?P<zone_a>[^\s，。,.！!？?；;]{1,8}?)(?:别看|不要看|不想看|别拍|不想让看|不想被看)"
+    r"|(?:别看|不要看|不想看|别拍)(?P<zone_b>[^\s，。,.！!？?；;]{1,8}))了?[吧呀啊呢]?")
+_IGNORE_ZONE_DEL_RE = re.compile(
+    r"(?:(?P<zone_a>[^\s，。,.！!？?；;]{1,8}?)(?:可以看|能看|想让你看|接着看)"
+    r"|(?:可以看|能看|想让你看|接着看)(?P<zone_b>[^\s，。,.！!？?；;]{1,8}))了?[吧呀啊呢]?")
+
+
+def _resolve_zone(text):
+    """口头配置里的区域说法归一到标准场景标签（SCENE_LEXICON + 敏感区）。
+    "卧室那屋别看了"→"卧室"；"电视别看了"认不出 → None（不接管）。"""
+    t = str(text or "").strip()
+    if not t or len(t) > 10:
+        return None
+    known = list(SCENE_LEXICON.keys()) + list(SENSITIVE_SCENES)
+    for scene in known:
+        if scene in t:
+            return scene
+    return None
+
+
+# ---------------------------------------------------------------- B-11：紧急联络（确定性流程，不调模型）
+# 任务卡 B-11 口径（主动呼叫部分，P0）：
+#   - 登记三路径：老人自报（逐位复述确认，首选）/ 子女端代填（仍向老人复述）/ 上门代填
+#     —— 三路径对后端只是 source 不同，逐位复述确认全部走这里
+#   - 可随时更正（同一复述确认流程）；三条全失败 → 标记未设置 + 每天提醒一次
+#   - 主动触发：老人语音"帮我给孩子打电话"/"打120" → 发起呼叫（不自主拨120，诚实标注）
+#   - 呼叫失败：超时/无人接 → 重试 1 次 → 兜底播报（绝不静默）
+#   - 被动转报（P1）不在本模块：异常触发（跌倒/漏药）→ 经 B-9 通道，依赖 H-7/B-9
+
+EMERGENCY_CALL_RE = re.compile(
+    r"(给(?:我)?(?:的)?(?:孩子|儿子|女儿|闺女|家属|家人|紧急联系人|联系人)[打发]?个?电话"
+    r"|打电话给(?:我)?(?:的)?(?:孩子|儿子|女儿|闺女|家属|家人|紧急联系人|联系人)"
+    r"|帮我[^，。,.!？?]{0,8}打(?:个)?电话"
+    r"|(?:快|赶紧)?打(?:个)?120|呼叫120|叫救护车)")
+_EMERGENCY_CONTACT_INTENT_RE = re.compile(
+    r"紧急联系人|(?:孩子|儿子|女儿|闺女)(?:的电话|号码)?是|联系人电话是")
+_CALL_120_RE = re.compile(r"打(?:个)?120|呼叫120|叫救护车")
+_PHONE_DIGITS_RE = re.compile(r"[0-9〇零一二三四五六七八九十百两]{6,}")
+
+# 复述确认答复分类复用 classify_confirm_reply（"对/没错/是"→yes；"不对/不是"→no）
+
+
+def _digits_to_norm(s):
+    """中文数字/〇 → 阿拉伯数字（老人口报号码常混念）：'一三八'→'138'。"""
+    mapping = {"〇": "0", "零": "0", "一": "1", "二": "2", "两": "2", "三": "3",
+               "四": "4", "五": "5", "六": "6", "七": "7", "八": "8", "九": "9"}
+    return "".join(mapping.get(ch, ch) for ch in str(s or ""))
+
+
+def _extract_phone(text):
+    """从话语提取电话号码（确定性）：返回 11 位手机号或 None。
+    '我儿子电话13812345678' / '一三八幺…'（中文数字）都认；不足 11 位 → None（不猜）。"""
+    m = _PHONE_DIGITS_RE.search(_digits_to_norm(str(text or "")))
+    if not m:
+        return None
+    digits = re.sub(r"\D", "", m.group(0))
+    if len(digits) == 11 and digits.startswith("1"):
+        return digits
+    return None
+
+
+def _format_phone(phone):
+    """逐位复述展示用：'138-1234-5678'。"""
+    p = str(phone or "")
+    return f"{p[0:3]}-{p[3:7]}-{p[7:11]}" if len(p) == 11 else p
+
+
+# ---------------------------------------------------------------- B-3：找物三级回答（B-1 PRD §3/§4 契约的执行点）
+# 任务卡 B-3 口径：查找记忆与图谱，两层兜底，source 标 text/graph；
+# B-2 spike no-go 降级 → 只跑文字层，接口不变（降级不破接口契约，不返工）。
+# 时间窗（B-1 PRD）：graph ≤30 天直答 / 30–180 stale / >180 不主动展示；
+# text ≤90 天 / >90 stale / >180 不主动引用。编造 0 容忍：无依据只说"我没瞅见"。
+
+FIND_OBJECT_RE = re.compile(
+    r"(?P<obj>[^\s，。,.！!？?；;]{1,10}?)"
+    r"(?:在哪里|在哪里了|在哪|在哪儿|哪儿|哪里|放哪了|放哪儿|放哪|搁哪了|搁哪|"
+    r"去哪了|哪儿去了|哪去了|什么地方|啥地方)[了呀啊呢]?")
+_FIND_OBJECT_PRONOUN_RE = re.compile(r"^(?:你|您|我|他|她|它|咱|谁)")
+GRAPH_WINDOW_DAYS = 30          # graph 层：30 天内直接答
+GRAPH_STALE_DAYS = 180         # graph 层：超 180 天不主动展示
+TEXT_STALE_DAYS = 90            # text 层：超 90 天提示"还在不"
+TEXT_MAX_DAYS = 180            # text 层：超 180 天不主动引用
+
+
+def _extract_find_object(text):
+    """从话语提取找物物品名（确定性，不调模型）："我降压药放哪了"→"降压药"。
+    不是找物句式、或物品是代词（"你在哪"）→ None。"""
+    t = str(text or "").strip()
+    if not t or len(t) > 25:
+        return None
+    m = FIND_OBJECT_RE.search(t)
+    if not m:
+        return None
+    obj = _strip_pronoun(m.group("obj"))
+    obj = re.sub(r"[在是的去到放搁]$", "", obj).strip()   # 剥被吞进去的尾部介词
+    if not obj or _FIND_OBJECT_PRONOUN_RE.match(obj):
+        return None
+    return obj
+
 
 # ---------------------------------------------------------------- MemoryBank
 
@@ -605,6 +782,13 @@ class MemoryBank:
         self.episodes = []          # 情节记忆：对话事件踪迹
         self.facts = []             # 语义记忆：画像事实（field+key 唯一）
         self.reflections = []       # 反思：高层画像结论
+        self.person_profiles = []  # 人物档案（B-5）：{name, calls, quotes, ts, first_ts}
+        # ---- B-4 写入护栏状态 ----
+        self.ignore_zones = []       # 免看清单（口头配置）：区域标签，帧源按标签跳过
+        self.visual_dedup_log = {}   # 去重窗口："{物}|{动作}|{位置}" -> 最后写入 ts
+        self.short_term_buffer = [] # 低置信视觉条目短期缓存（不进记忆箱、检索不可见）
+        self.write_stats = {"blocked_by_zone": 0, "blocked_by_dedup": 0,
+                            "low_conf_buffered": 0, "visual_written": 0}
         self.pending_confirms = []  # 待主动确认的事实 [{"fact_id","ts"}]
         self.active_confirm = None  # 已问出、等老人答复 {"fact_id","ts"}
         self._reflect_imp = 0
@@ -627,6 +811,13 @@ class MemoryBank:
         self.episodes = data.get("episodes", []) or []
         self.facts = data.get("facts", []) or []
         self.reflections = data.get("reflections", []) or []
+        self.person_profiles = data.get("person_profiles", []) or []
+        self.ignore_zones = data.get("ignore_zones", []) or []
+        self.visual_dedup_log = data.get("visual_dedup_log", {}) or {}
+        self.short_term_buffer = data.get("short_term_buffer", []) or []
+        ws = data.get("write_stats") or {}
+        self.write_stats.update({k: int(v) for k, v in ws.items()
+                                 if k in self.write_stats})
         self.pending_confirms = data.get("pending_confirms", []) or []
         self.active_confirm = data.get("active_confirm") or None
         self._reflect_imp = data.get("reflect_imp", 0)
@@ -649,7 +840,10 @@ class MemoryBank:
         self.pending_confirms = self.pending_confirms[:5]
         data = {
             "episodes": self.episodes, "facts": self.facts,
-            "reflections": self.reflections, "pending_confirms": self.pending_confirms,
+            "reflections": self.reflections, "person_profiles": self.person_profiles,
+            "ignore_zones": self.ignore_zones, "visual_dedup_log": self.visual_dedup_log,
+            "short_term_buffer": self.short_term_buffer, "write_stats": self.write_stats,
+            "pending_confirms": self.pending_confirms,
             "active_confirm": self.active_confirm,
             "reflect_imp": self._reflect_imp, "reflect_cnt": self._reflect_cnt,
             "last_reflect_try": self._last_reflect_try,
@@ -1023,6 +1217,546 @@ class MemoryBank:
             lines.append(f"- {humanize_day(e.get('ts', 0), now)}：{e['text']}")
         return "\n".join(lines)
 
+    # ---- B-5①：三维检索（按人/按物/按场景，统一入口）----
+    def _resolve_person(self, q):
+        """人物维度解析：档案优先（名字/称谓命中）；无档案退三类（本人/访客/宠物）。
+        具名人物（如"孙子"）无档案 → fallback_visitor——只显"有客人来过"，
+        绝不猜人名（F-4 兜底逻辑）。"""
+        q = re.sub(r"^[我们俺们咱]*[我俺咱]", "", str(q or "").strip()) or str(q or "").strip()
+        # 1) 档案优先（AI 不猜：档案只来自老人主动陈述+确认，见 add_person_profile）
+        for p in self.person_profiles:
+            names = [p.get("name", "")] + list(p.get("calls") or [])
+            for n in names:
+                if n and (n in q or similarity(n, q) >= 0.3):
+                    return {"kind": "profile", "profile": p, "label": p.get("name", "")}
+        # 2) 三类（MVP 只承诺这三类）
+        if any(w in q for w in PET_WORDS):
+            return {"kind": "pet", "profile": None, "label": "宠物"}
+        if any(w in q for w in VISITOR_WORDS):
+            return {"kind": "visitor", "profile": None, "label": "访客"}
+        if any(w in q for w in SELF_WORDS):
+            return {"kind": "self", "profile": None, "label": "本人"}
+        # 3) 无档案的具名人物 → 退回访客类（不显示猜的人名）
+        return {"kind": "fallback_visitor", "profile": None, "label": "访客"}
+
+    def _resolve_scene(self, q):
+        """场景维度解析：词典命中（"做饭"→厨房）→ 相似度兜底；认不出返回 None。"""
+        q = str(q or "").strip()
+        best, best_s = None, 0.0
+        for canon, words in SCENE_LEXICON.items():
+            if q == canon or any(w in q or q in w for w in words):
+                return {"kind": "scene", "scene": canon, "label": canon}
+            s = max((similarity(q, w) for w in words), default=0.0)
+            if s > best_s:
+                best, best_s = canon, s
+        if best is not None and best_s >= 0.4:
+            return {"kind": "scene", "scene": best, "label": best}
+        return {"kind": "scene", "scene": None, "label": None}
+
+    @staticmethod
+    def _search_item(mem, score):
+        """检索结果条目（JSON 可序列化；facts 带 history 供"旧值可查"）
+        类型判定：事实有 key 无 text；情节有 text；反思只剩 text 无 field。"""
+        if "key" in mem:
+            mtype = "fact"
+        elif "field" in mem:
+            mtype = "episode"
+        else:
+            mtype = "reflection"
+        item = {"type": mtype, "id": mem.get("id"), "ts": mem.get("ts", 0),
+                "score": round(float(score), 3)}
+        if "text" in mem:
+            item["text"] = mem["text"]
+            item["quote"] = mem.get("quote", "")
+        else:
+            quotes = mem.get("quotes") or []
+            item.update({"key": mem.get("key"), "value": mem.get("value"),
+                         "quote": quotes[0] if quotes else "",
+                         "history": mem.get("history") or []})
+        return item
+
+    def search(self, query, by="object", k=10, now=None):
+        """统一检索入口（B-5，供 /api/memory/search、B-8 盲盒、F-4 时间线调用）。
+        by ∈ person|object|scene；复用三因子打分（新近性×重要性×相关性）。
+        只读检索：不强化、不改动记忆（翻时间线≠回忆强化，防浏览把记忆越翻越牢）。
+        返回 {"by","query","resolved","results":[...]}：
+          - person.resolved.kind ∈ profile|visitor|pet|self|fallback_visitor
+            （fallback_visitor = 查无档案的具名人物，UI 只显"有客人来过"，不显猜的名字）
+          - fact 条目带 history，旧值随检索可查
+        """
+        by = str(by or "").strip().lower()
+        q = str(query or "").strip()
+        if by not in ("person", "object", "scene"):
+            return {"by": by, "query": q, "resolved": None, "results": [],
+                    "message": "by 只支持 person/object/scene"}
+        if not q:
+            return {"by": by, "query": "", "resolved": None, "results": [],
+                    "message": "空查询"}
+        try:
+            k = max(1, min(50, int(k)))
+        except (TypeError, ValueError):
+            k = 10
+        now = now or self.clock()
+        with self._lock:
+            pool = ([f for f in self.facts if retrievability(f, now) >= FORGET_THRESHOLD]
+                    + [e for e in self.episodes if retrievability(e, now) >= FORGET_THRESHOLD]
+                    + [r for r in self.reflections if retrievability(r, now) >= FORGET_THRESHOLD])
+            if by == "person":
+                resolved = self._resolve_person(q)
+                if resolved["kind"] == "profile":
+                    p = resolved["profile"]
+                    names = [n for n in [p.get("name", "")] + list(p.get("calls") or []) if n]
+                    pool = [m for m in pool if any(n in self._mem_text(m) for n in names)]
+                    score_q = names[0]
+                elif resolved["kind"] in ("visitor", "fallback_visitor"):
+                    pool = [m for m in pool
+                            if any(w in self._mem_text(m) for w in VISITOR_WORDS)]
+                    score_q = q
+                elif resolved["kind"] == "pet":
+                    pool = [m for m in pool
+                            if any(w in self._mem_text(m) for w in PET_WORDS)]
+                    score_q = q
+                else:   # self：老人的记忆本来就是关于本人的
+                    score_q = q
+                scored = sorted(((self._score(m, score_q, now), m) for m in pool),
+                                key=lambda x: -x[0])
+                resolved = {kk: vv for kk, vv in resolved.items() if kk != "profile"}
+                resolved["name"] = resolved.get("label")
+            elif by == "object":
+                pool = [m for m in pool if similarity(q, self._mem_text(m)) > 0]
+                def _boost(m):
+                    key = m.get("key") or ""
+                    return 2.0 if key in (q, f"{q[:6]}位置") else 0.0
+                scored = sorted(((self._score(m, q, now) + _boost(m), m) for m in pool),
+                                key=lambda x: -x[0])
+                resolved = {"kind": "object", "label": q, "object": q}
+            else:   # scene
+                resolved = self._resolve_scene(q)
+                canon = resolved.get("scene")
+                words = SCENE_LEXICON.get(canon, []) + ([canon] if canon else [])
+                if canon is not None:
+                    # 词典已归位：只收标签（H-2）+词典词命中——相似度兜底会把
+                    # "做饭"串到"餐桌吃饭"（字面"饭"重叠），场景检索宁可少收不串台
+                    pool = [m for m in pool
+                            if m.get("scene") == canon
+                            or any(w in self._mem_text(m) for w in words)]
+                else:
+                    # 场景没认出来（词典外场景）→ 相似度兜底
+                    pool = [m for m in pool if similarity(q, self._mem_text(m)) > 0]
+                scored = sorted(((self._score(m, q, now), m) for m in pool),
+                                key=lambda x: -x[0])
+            results = [self._search_item(m, s) for s, m in scored[:k]]
+        return {"by": by, "query": q, "resolved": resolved, "results": results}
+
+    # ---- B-5②：显式更正（值更新 + 历史保留）----
+    def _find_fact_fuzzy(self, key=None, old_value=None):
+        """按 key（精确→bigram 模糊 ≥0.45，ASR 容错）或旧值定位事实；找不到返回 None。
+        护栏：模糊匹配不碰"X位置"键（位置事实归 H-3/B-2 找物流程管，
+        "把降压药改成饭后吃"绝不许覆写"降压药位置=药箱"）；显式带"位置"的 key 走精确匹配。"""
+        if key:
+            fact = next((f for f in self.facts if f["key"] == key), None)
+            if fact is not None:
+                return fact
+            cands = [(similarity(key, f.get("key", "")), f) for f in self.facts
+                     if not (f.get("key", "").endswith("位置") and not key.endswith("位置"))]
+            best = max(cands, key=lambda x: x[0], default=None)
+            if best and best[0] >= 0.45:
+                return best[1]
+        if old_value:
+            old_value = _norm_value(old_value)
+            return next((f for f in self.facts
+                         if _norm_value(f.get("value", "")) == old_value
+                         or similarity(f.get("value", ""), old_value) >= 0.6), None)
+        return None
+
+    def correct_fact(self, key, new_value, old_value=None, quote="", now=None):
+        """显式更正（B-5）：值即时更新、旧值入 history 保留可查（不是物理删）。
+        新旧值规则：AI 回答一律用新值（fact.value 已更新，检索/注入自然用新值）。
+        找不到目标事实时：key 有效 → 当新事实记下（老人亲口说的最可靠）；否则 None。"""
+        now = now or self.clock()
+        key = _norm_key(key) if key else ""
+        new_value = _norm_value(new_value)
+        if not new_value:
+            return None
+        with self._lock:
+            fact = self._find_fact_fuzzy(key=key or None, old_value=old_value)
+            if fact is None and old_value is None and key:
+                # "把豆豆改成毛毛"：豆豆不是键是旧值 → 按值再定位一次
+                fact = self._find_fact_fuzzy(key=None, old_value=key)
+            if fact is None:
+                if not key:
+                    return None
+                field = "家庭" if _FAMILY_RELATION_RE.search(key) else "其他"
+                fid, _ = self._add_fact(field=field, key=key, value=new_value,
+                                        quote=quote, importance=7, confidence=0.95, now=now)
+                self._save()
+                return {"action": "added", "fact_id": fid, "key": key,
+                        "value": new_value, "previous": None}
+            if _norm_value(fact["value"]) == new_value:
+                fact["confidence"] = min(1.0, fact.get("confidence", 0.8) + 0.1)
+                fact["strength"] = min(STRENGTH_CAP_DAYS, fact.get("strength", 1.0) * 1.3 + 1.0)
+                fact["recall_count"] = int(fact.get("recall_count", 0)) + 1
+                fact["last_recall"] = now
+                self._save()
+                return {"action": "noop", "fact_id": fact["id"], "key": fact["key"],
+                        "value": fact["value"], "previous": None}
+            prev = fact["value"]
+            fact["history"].append({"value": prev, "ts": fact["ts"],
+                                    "quote": fact["quotes"][0] if fact["quotes"] else ""})
+            fact["history"] = fact["history"][-5:]
+            fact["value"] = new_value
+            fact["ts"] = now
+            fact["confidence"] = 0.95          # 老人亲口更正 = 最高置信
+            fact["importance"] = max(int(fact.get("importance", 5)), 7)
+            if quote and quote not in fact["quotes"]:
+                fact["quotes"] = (fact["quotes"] + [quote])[-5:]
+            fact["last_recall"] = now
+            self._save()
+            return {"action": "corrected", "fact_id": fact["id"], "key": fact["key"],
+                    "value": new_value, "previous": prev}
+
+    def history_of(self, key, now=None):
+        """旧值可查（B-5）：按 key（精确→模糊→按当前值/历史值）定位事实。
+        返回 {"matched": key|current|old, "key", "value", "history":[...]}；None=没记过。"""
+        key = _norm_key(key) if key else ""
+        if not key:
+            return None
+        with self._lock:
+            fact = self._find_fact_fuzzy(key=key)
+            if fact is not None:
+                matched = "key"
+            else:
+                fact = next((f for f in self.facts
+                             if _norm_value(f.get("value", "")) == key), None)
+                if fact is not None:
+                    matched = "current"
+                else:
+                    fact = next((f for f in self.facts
+                                 if any(_norm_value(h.get("value", "")) == key
+                                        for h in f.get("history") or [])), None)
+                    matched = "old" if fact is not None else None
+            if fact is None:
+                return None
+            return {"matched": matched, "key": fact["key"], "value": fact["value"],
+                    "history": list(fact.get("history") or [])}
+
+    def handle_explicit_correction(self, text, call_name="奶奶", now=None):
+        """显式更正 + 旧值问句的确定性闭环（B-5，供 app.chat_response 调用）：
+          - "我孙子不叫豆豆，叫毛毛" / "把豆豆改成毛毛" → 值更新、旧值入历史
+          - "我孙子之前叫啥来着" → 答旧值 + 补"后来改成X了"（规则写死，不靠模型发挥）
+        返回回复文案；None = 不是这两类句式（放行给正常聊天）。话术里绝不编造：
+        没记过/没改过就返回 None 交给正常对话，不说"您以前叫X"。"""
+        t = str(text or "").strip()
+        if not t or len(t) > 40:      # 更正/旧值问句都是短句，长句多半是叙述
+            return None
+        now = now or self.clock()
+        m = CORRECT_INTENT_RE.search(t)
+        if m:
+            if m.group("new0"):
+                thing, old, new = m.group("thing0"), m.group("old0"), m.group("new0")
+            else:
+                thing, old, new = m.group("thing1"), None, m.group("new1")
+            thing = _strip_pronoun(thing)
+            new = _norm_value(new)
+            if not new:
+                return None
+            res = self.correct_fact(key=thing or None, new_value=new,
+                                    old_value=old, quote=t[:60], now=now)
+            if res is None:
+                return None
+            if res["action"] == "corrected":
+                return (f"好嘞{call_name}，我这就改过来——{res['key']}现在是"
+                        f"{res['value']}了，以前那个我记在老账上，往后都用新的。")
+            if res["action"] == "noop":
+                return f"嗯呐{call_name}，{res['key']}就是{res['value']}，我记得牢牢的。"
+            return f"好嘞{call_name}，记下了——{res['key']}是{res['value']}。"
+        m = OLD_VALUE_Q_RE.search(t)
+        if m:
+            thing = _strip_pronoun(m.group("thing"))
+            if not thing:
+                return None
+            hist = self.history_of(thing, now=now)
+            if hist is None or not hist.get("history"):
+                return None       # 没记过/没改过 → 放行正常聊天（不编造旧值）
+            cur = hist["value"]
+            if hist["matched"] == "old":   # 老人拿旧值来问（"豆豆之前叫啥"）
+                return f"{thing}是{hist['key']}以前的叫法，后来改成{cur}了。"
+            olds = [h.get("value", "") for h in hist["history"]]
+            if len(olds) == 1:
+                return f"您之前{hist['key']}叫{olds[0]}，后来改成{cur}了。"
+            return f"您{hist['key']}以前叫过{'、'.join(olds)}，现在叫{cur}。"
+        return None
+
+    # ---- B-5：人物档案（建档路径归 F-4/H-3，本处只提供存储+检索解析）----
+    def add_person_profile(self, name, call, quote="", now=None):
+        """人物档案（B-5 存储）：姓名+称谓，不存人脸特征（人脸比对按 B-4 只存本地）。
+        建档唯一路径 = 老人主动陈述（"这是我孙子豆豆"）+ 小忆确认——AI 不猜、
+        子女端不建档（零子女配置原则）。同名已存在 → 合并称谓；返回 {"ok",...}。"""
+        now = now or self.clock()
+        name, call = _norm_value(name), _norm_value(call)
+        if not name:
+            return {"ok": False, "message": "名字没听清，您再说一遍"}
+        with self._lock:
+            for p in self.person_profiles:
+                if p.get("name") == name:
+                    if call and call not in (p.get("calls") or []):
+                        p["calls"] = (p.get("calls") or []) + [call]
+                    if quote and quote not in (p.get("quotes") or []):
+                        p["quotes"] = (p.get("quotes") or [quote])[-5:]
+                    p["ts"] = now
+                    self._save()
+                    return {"ok": True, "name": name, "call": call}
+            prof = {"name": name, "calls": [call] if call else [],
+                    "quotes": [quote] if quote else [], "ts": now, "first_ts": now}
+            self.person_profiles.append(prof)
+            self._save()
+            return {"ok": True, "name": name, "call": call}
+
+    def remove_person_profile(self, name):
+        """删除档案（老人说"别叫了"→退回三类）。返回删除条数。"""
+        name = _norm_value(name)
+        if not name:
+            return 0
+        with self._lock:
+            before = len(self.person_profiles)
+            self.person_profiles = [p for p in self.person_profiles
+                                    if p.get("name", "") != name
+                                    and similarity(p.get("name", ""), name) < 0.6]
+            removed = before - len(self.person_profiles)
+            if removed:
+                self._save()
+            return removed
+
+    # ---- B-4：视觉条目写入护栏（四类规则的统一执行点，B-2/H-2 帧源调用）----
+    def _zone_blocked(self, position):
+        """位置标签是否被拒写：免看清单（口头配置）或敏感区（默认防线）。"""
+        pos = str(position or "").strip()
+        if not pos:
+            return False
+        if any(z and (z in pos or pos in z) for z in self.ignore_zones):
+            return True
+        # 敏感区兜底：装机 SOP 物理规避为主，这里按位置标签做最后防线
+        # （机位视野偶然覆盖敏感区边缘时，"敏感区条目不写入"仍是规则）
+        return any(s in pos for s in SENSITIVE_SCENES)
+
+    def ingest_visual_event(self, event_type, object_name, position,
+                            confidence, ts=None, furniture=""):
+        """视觉条目统一写入入口（B-4，持续录制开闸后的"卫生标准"执行点）。
+        规则顺序：① 免看清单/敏感区拒写 ② 30 分钟去重 ③ 低置信只进短期缓存
+        ④ 高置信写长期记忆（episodes，source="visual"）。返回 {"action", ...}。
+
+        边界：本入口只管摄像头帧；老人亲口说的（observe 语音路径）不经此护栏——
+        老人说"我在卫生间摔了一跤"是健康事件必须记，摄像头才有隐私边界。
+        """
+        now = ts if ts is not None else self.clock()
+        event_type = str(event_type or "appear").strip() or "appear"
+        obj = _norm_value(object_name)
+        pos = str(position or "").strip()
+        if not obj:
+            return {"action": "invalid", "reason": "missing_object"}
+        try:
+            conf = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            conf = 0.0
+        with self._lock:
+            # ① 免看清单 / 敏感区拒写
+            if self._zone_blocked(pos):
+                self.write_stats["blocked_by_zone"] += 1
+                self._save()
+                return {"action": "blocked_by_zone", "zone": pos}
+            # ② 去重：同物品+同动作+同位置 30 分钟内只写一条（更新时间戳，不重复堆积）
+            dedup_key = f"{obj}|{event_type}|{pos}"
+            last = self.visual_dedup_log.get(dedup_key)
+            if last is not None and 0 <= (now - last) < DEDUP_WINDOW_SECONDS:
+                self.write_stats["blocked_by_dedup"] += 1
+                self._save()
+                return {"action": "blocked_by_dedup",
+                        "window_left_sec": int(DEDUP_WINDOW_SECONDS - (now - last))}
+            # 窗口过期条目顺带清理（防日志无限增长）
+            self.visual_dedup_log = {k: v for k, v in self.visual_dedup_log.items()
+                                     if (now - v) < DEDUP_WINDOW_SECONDS * 4}
+            self.visual_dedup_log[dedup_key] = now
+            # ③④ 分级写入：低置信只进短期缓存（不进记忆箱、检索不可见）；高置信进长期
+            entry = {"event_type": event_type, "object": obj, "position": pos,
+                     "furniture": str(furniture or ""), "confidence": round(conf, 3),
+                     "ts": now}
+            if conf < VISUAL_HIGH_CONFIDENCE:
+                entry["id"] = self._next_id("vb", now)
+                self.short_term_buffer.append(entry)
+                self.short_term_buffer = self.short_term_buffer[-SHORT_TERM_BUFFER_CAP:]
+                self.write_stats["low_conf_buffered"] += 1
+                self._save()
+                return {"action": "buffered", "entry": entry}
+            verb = {"place": "放下", "take": "拿走", "appear": "瞅见"}.get(event_type, "瞅见")
+            if event_type == "appear":
+                text = f"看见{obj}在{pos}" + (f"的{furniture}" if furniture else "")
+            else:
+                text = f"{obj}被{verb}了，在{pos}"
+            ep = {"id": self._next_id("ve", now), "text": text, "quote": text,
+                  "field": "物品", "ts": now, "importance": 4 if conf < 0.9 else 5,
+                  "strength": 1.0, "recall_count": 0, "last_recall": now,
+                  "source": "visual", "scene": pos, "confidence": round(conf, 3),
+                  "object": obj, "furniture": str(furniture or "")}
+            self.episodes.append(ep)
+            self.write_stats["visual_written"] += 1
+            self._save()
+            return {"action": "written", "entry": ep}
+
+    # ---- B-4：免看清单（口头配置：随时一句话增删，无设置界面——与零配置一致）----
+    def add_ignore_zone(self, zone):
+        """加入免看清单：帧源按标签跳过对应区域（区域级跳过按粗位置标签，不依赖场景分类）。"""
+        zone = str(zone or "").strip()
+        if not zone or zone in self.ignore_zones:
+            return False
+        self.ignore_zones.append(zone)
+        self._save()
+        return True
+
+    def remove_ignore_zone(self, zone):
+        """从免看清单移除（"卧室可以看了"）。返回是否移除。"""
+        zone = str(zone or "").strip()
+        if zone not in self.ignore_zones:
+            return False
+        self.ignore_zones.remove(zone)
+        self._save()
+        return True
+
+    def handle_ignore_zone_request(self, text, call_name="奶奶", now=None):
+        """免看清单口头配置闭环（B-4，供 app.chat_response 调用，确定性流程）：
+          - "卧室别看了" / "别看卧室了" → 加入免看清单
+          - "卧室可以看了" / "能看卧室了" → 移除
+        认不出的说法（"电视别看了"）返回 None 放行正常聊天，绝不猜区域。"""
+        t = str(text or "").strip()
+        if not t or len(t) > 20:
+            return None
+        m = _IGNORE_ZONE_DEL_RE.search(t)
+        if m:
+            zone_raw = m.group("zone_a") or m.group("zone_b") or ""
+            zone = _resolve_zone(zone_raw)
+            if zone:
+                if zone in self.ignore_zones:
+                    self.remove_ignore_zone(zone)
+                    return f"好嘞{call_name}，{zone}我接着帮您留心着。"
+                return f"{call_name}，{zone}本来就在看着呢，没关。"
+        m = _IGNORE_ZONE_ADD_RE.search(t)
+        if m:
+            zone_raw = m.group("zone_a") or m.group("zone_b") or ""
+            zone = _resolve_zone(zone_raw)
+            if zone:
+                if zone not in self.ignore_zones:
+                    self.add_ignore_zone(zone)
+                return f"好嘞{call_name}，{zone}我不看了，您放心。"
+        return None
+
+    # ---- B-4：audit 每日自检（B-10 报告"记忆箱健康"项的数据源）----
+    def health_audit(self, now=None):
+        """记忆箱健康自检（每日跑，调用方归 B-10 调度）：
+        条目数 / 重复率 / 敏感词命中 / 拦截统计。规则执行出 bug 能被发现，不是靠运气。
+        - 敏感词命中只扫视觉条目（source="visual"）——语音条目无隐私边界
+        - 视觉重复堆积 = 视觉条目 text 完全重复的对数（去重规则失效的信号）
+        """
+        now = now or self.clock()
+        with self._lock:
+            visual_eps = [e for e in self.episodes if e.get("source") == "visual"]
+            texts = [e.get("text", "") for e in visual_eps]
+            dup_pairs = len(texts) - len(set(texts))
+            sensitive_hits = [e for e in visual_eps
+                              if any(s in e.get("text", "") or s in e.get("scene", "")
+                                     for s in SENSITIVE_SCENES)]
+            audit = {
+                "ts": now,
+                "counts": {"facts": len(self.facts), "episodes": len(self.episodes),
+                           "reflections": len(self.reflections),
+                           "visual_episodes": len(visual_eps),
+                           "short_term_buffer": len(self.short_term_buffer)},
+                "visual_duplicate_pairs": dup_pairs,
+                "sensitive_hits": len(sensitive_hits),
+                "sensitive_hit_ids": [e.get("id") for e in sensitive_hits][:10],
+                "blocked": dict(self.write_stats),
+                "ignore_zones": list(self.ignore_zones),
+            }
+        issues = []
+        if dup_pairs > 0:
+            issues.append("visual_duplicate")
+        if audit["sensitive_hits"] > 0:
+            issues.append("sensitive_leak")
+        audit["status"] = "attention" if issues else "healthy"
+        audit["issues"] = issues
+        return audit
+
+    # ---- B-3：找物三级回答（B-1 PRD §3 的执行点；POST /api/find_object 走这里）----
+    def find_object(self, text, call_name="奶奶", now=None):
+        """找物三级回答（graph → text → none，B-1 PRD §3 话术写死）。
+        返回 PRD §4 契约结构 + reply 话术；不是找物话语 → None（放行正常聊天）。
+
+        graph 层 = 视觉条目（B-4 ingest_visual_event 写入，B-2 正式图谱
+        到位后同字段兼容）；B-2 spike no-go 降级 = 无视觉条目时自动只剩 text 层，
+        接口不变（source 标 text/graph，F-1 按此展示）。
+        has_clean_crop 恒 False：H-2 裁剪图二次检测未供，F-1 不展示图、只语音答位置。
+        """
+        obj = _extract_find_object(text)
+        if obj is None:
+            return None
+        now = now or self.clock()
+        with self._lock:
+            # ---- L1 图谱层（视觉条目，"我见过"）----
+            best = None
+            for e in self.episodes:
+                if e.get("source") != "visual":
+                    continue
+                if e.get("confidence", 0) < VISUAL_HIGH_CONFIDENCE:
+                    continue                      # 只引高置信条目（PRD：≥0.8）
+                age = now - e.get("ts", 0)
+                if age > GRAPH_STALE_DAYS * 86400:
+                    continue                      # >180 天不主动展示
+                name = e.get("object") or ""
+                hit = (obj == name or obj in e.get("text", "")
+                       or similarity(obj, e.get("text", "")) >= 0.3)
+                if hit and (best is None or e.get("ts", 0) > best.get("ts", 0)):
+                    best = e
+            if best is not None:
+                scene = best.get("scene") or ""
+                furn = best.get("furniture") or ""
+                position = f"{scene}的{furn}" if furn else scene
+                age_days = (now - best.get("ts", 0)) / 86400.0
+                when = humanize_ago(best.get("ts", 0), now)
+                if age_days <= GRAPH_WINDOW_DAYS:
+                    reply = (f"我瞅见它了——{obj}最后见到在{position}，"
+                             f"是{when}。")
+                else:
+                    reply = (f"好久没见它了，上次{when}见着{obj}在{position}，"
+                             f"还在不？")
+                return {"tier": "graph", "source": "graph", "object": obj,
+                        "position": position, "last_seen_at": best.get("ts", 0),
+                        "confidence": best.get("confidence", 0),
+                        "has_clean_crop": False, "crop_url": None,
+                        "stale": age_days > GRAPH_WINDOW_DAYS, "too_old": False,
+                        "reply": reply}
+            # ---- L2 文字层（"您说过"，不冒充"我见过"）----
+            fact = self._find_fact_fuzzy(key=f"{obj}位置")
+            if fact is None:
+                fact = self._find_fact_fuzzy(key=obj)
+            if fact is not None and "位置" in fact.get("key", ""):
+                age_days = (now - fact.get("ts", 0)) / 86400.0
+                if age_days <= TEXT_MAX_DAYS:
+                    pos_val = fact.get("value", "")
+                    reply = f"这个我没瞅见，不过您上次说{obj}在{pos_val}。"
+                    if age_days > TEXT_STALE_DAYS:
+                        reply += "那是好久以前说的了，还在不？"
+                    return {"tier": "text", "source": "text", "object": obj,
+                            "position": pos_val, "last_seen_at": fact.get("ts", 0),
+                            "confidence": fact.get("confidence", 0),
+                            "has_clean_crop": False, "crop_url": None,
+                            "stale": age_days > TEXT_STALE_DAYS, "too_old": False,
+                            "reply": reply}
+            # ---- L3 诚实兜底（编造 0 容忍：无依据只说没瞅见）----
+            reply = (f"我没瞅见{obj}，您帮我找找？找不着您告诉我放哪儿了，"
+                     f"我记上。您下次放哪儿跟我说一声，我下次就找得快了。")
+            return {"tier": "none", "source": "none", "object": obj,
+                    "position": None, "last_seen_at": None, "confidence": 0,
+                    "has_clean_crop": False, "crop_url": None,
+                    "stale": False, "too_old": False, "reply": reply}
+
     # ---- 反思升华 ----
     def _maybe_reflect(self, now, force=False):
         with self._lock:
@@ -1301,3 +2035,268 @@ class MemoryBank:
                 n += 1
             self._save()
         return n
+
+
+# ================================================================ B-11：紧急联络存储与闭环
+# 独立小存储（不进 facts/episodes——紧急联系人属于安全数据，不走画像淡忘/剪枝），
+# 持久化到同目录 emergency_contact.json，原子写，读写持锁。
+
+class EmergencyContactStore:
+    """紧急联系人登记（B-11）：
+    - contact: {"name", "phone", "relation", "source", "ts", "confirmed"}
+      source ∈ {"elder"(老人自报，首选), "child"(子女端代填，仍向老人复述), "staff"(上门代填)}
+    - pending: 复述确认流程状态 {"name","phone","relation","source","ts"}
+      确认通过（老人说"对/没错"）才落 contact——防听岔（听岔常在后两位）
+    - 呼叫日志 call_log: [{"ts","phone","name","target","status","retries","message"}]
+      status ∈ {"dialing","failed","fallback"}；绝不静默——失败也写日志+返回兜底话术
+    - 未设置兜底：contact 为空时 daily_nudge_due() 每天提醒一次（供 proactive 引擎调）
+    时钟注入可测试；phone 校验 11 位手机号（不猜、不足位拒收）。
+    """
+
+    NUDGE_INTERVAL = 24 * 3600   # 未设置提醒：每天一次
+    CONFIRM_EXPIRE = 10 * 60     # 复述确认超时：10 分钟没答就作废重来（防陈旧确认）
+
+    def __init__(self, path="emergency_contact.json", clock=_time.time):
+        self.path = path
+        self.clock = clock
+        self._lock = threading.RLock()
+        self.contact = None
+        self.pending = None
+        self.call_log = []
+        self._last_nudge_ts = 0.0
+        self._caller = None            # 呼叫通道 callable（wechat_caller 注入）；None=诚实降级
+        self._load()
+
+    def set_caller(self, fn):
+        """注入呼叫通道 caller(phone, name)->bool（B-11：微信语音拉起等）；None 恢复降级"""
+        self._caller = fn
+
+    # ---- 持久化（原子写，防断电损坏）----
+    def _load(self):
+        if not os.path.exists(self.path):
+            return
+        try:
+            with open(self.path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return
+        if not isinstance(data, dict):
+            return
+        self.contact = data.get("contact") or None
+        self.pending = data.get("pending") or None
+        self.call_log = (data.get("call_log") or [])[-100:]
+        self._last_nudge_ts = float(data.get("last_nudge_ts", 0.0) or 0.0)
+
+    def _save(self):
+        data = {"contact": self.contact, "pending": self.pending,
+                "call_log": self.call_log[-100:],
+                "last_nudge_ts": self._last_nudge_ts}
+        tmp = f"{self.path}.{os.getpid()}_{threading.get_ident()}.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, self.path)
+
+    # ---- 登记第一步：提交候选 → 进入复述确认（三路径 source 区分，流程同一套）----
+    def submit(self, name, phone, relation="", source="elder", now=None):
+        """提交联系人候选，返回复述确认话术。
+        phone 必须 11 位手机号——不足位/含糊 → 拒收并请老人重报（不猜）。
+        source=child/staff 时仍向老人复述（老人必须知道名单是谁，不能"被配置"）。"""
+        now = now or self.clock()
+        name = _norm_value(name)
+        digits = re.sub(r"\D", "", str(phone or ""))
+        if not name:
+            return {"ok": False, "message": "名字没听清，您再说一遍。"}
+        if len(digits) != 11 or not digits.startswith("1"):
+            return {"ok": False,
+                    "message": "电话号码没记全，您把号码一位一位慢慢说，我记牢靠。"}
+        with self._lock:
+            self.pending = {"name": name, "phone": digits,
+                            "relation": _norm_value(relation) or "家人",
+                            "source": source, "ts": now}
+            self._save()
+        who = f"您的{self.pending['relation']}{name}" if relation else f"{name}"
+        return {"ok": True, "pending": True,
+                "message": (f"我念一遍您听对不对——{who}，电话"
+                            f"{_format_phone(digits)}，一位一位说就是，"
+                            f"{''.join(digits)}。对吧？")}
+
+    # ---- 登记第二步：老人答复复述 → 确认/否认 ----
+    def resolve_confirm(self, reply_text, now=None):
+        """老人答复复述确认（"对/没错" / "不对"）。
+        返回 {"ok", "action", "message"}；action ∈ confirmed/rejected/expired/none。
+        复述确认 100% 执行：没有 pending 或已超时 → expired（重新走登记），绝无直接写入。"""
+        now = now or self.clock()
+        with self._lock:
+            pend = self.pending
+            if not pend:
+                return {"ok": False, "action": "none",
+                        "message": "咱们先说好记谁的电话，您报个名字和号码。"}
+            if now - float(pend.get("ts", 0) or 0) > self.CONFIRM_EXPIRE:
+                self.pending = None
+                self._save()
+                return {"ok": False, "action": "expired",
+                        "message": "刚才那个确认耽搁久了，您再报一遍，我重新记。"}
+            ans = classify_confirm_reply(str(reply_text or ""))[0]
+            if ans == "yes":
+                self.contact = {k: pend[k] for k in
+                                ("name", "phone", "relation", "source")}
+                self.contact["ts"] = now
+                self.contact["confirmed"] = True
+                self.pending = None
+                self._last_nudge_ts = 0.0      # 设好了，未设置提醒清零
+                self._save()
+                return {"ok": True, "action": "confirmed",
+                        "message": ("记好啦——紧急联系人是" + self.contact["relation"]
+                                    + self.contact["name"] + "，电话"
+                                    + _format_phone(self.contact["phone"])
+                                    + "。真有事您说一声，我马上帮他打。")}
+            if ans == "no":
+                self.pending = None
+                self._save()
+                return {"ok": True, "action": "rejected",
+                        "message": "那就是我记岔了，您重新说一遍，我再核对。"}
+            return {"ok": False, "action": "none",
+                    "message": "您说对没错就是记好了，说不对咱就重来。"}
+
+    # ---- 查询/更正 ----
+    def get(self):
+        """当前已确认联系人（未设置返回 None）。"""
+        with self._lock:
+            return dict(self.contact) if self.contact else None
+
+    def status(self, now=None):
+        """状态总览（供 proactive 每日提醒与 API 查询）。"""
+        now = now or self.clock()
+        with self._lock:
+            return {"set": bool(self.contact),
+                    "contact": dict(self.contact) if self.contact else None,
+                    "awaiting_confirm": bool(self.pending),
+                    "last_call": self.call_log[-1] if self.call_log else None}
+
+    def clear(self, now=None):
+        """删除联系人（老人说"别记了"）。"""
+        with self._lock:
+            removed = self.contact is not None
+            self.contact = None
+            self.pending = None
+            self._save()
+        return removed
+
+    # ---- 未设置兜底：每天提醒一次 ----
+    def daily_nudge_due(self, now=None):
+        """未设置时每天提醒一次（B-11 三路径全失败兜底）。
+        返回提醒话术或 None（已设置 / 当天已提醒过 / 距上次还没到 24h）。"""
+        now = now or self.clock()
+        with self._lock:
+            if self.contact or self.pending:
+                return None
+            if now - self._last_nudge_ts < self.NUDGE_INTERVAL:
+                return None
+            self._last_nudge_ts = now
+            self._save()
+            return ("您的紧急联系人还没设置，真出事了该打给谁呀？"
+                    "您跟我说个名字和电话就行，我记好了帮您打。")
+
+    # ---- 主动呼叫（MVP 电脑通道；不自主拨 120——诚实标注，不装）----
+    def request_call(self, target="contact", caller=None, now=None):
+        """发起呼叫请求（MVP：电脑呼叫通道由 caller callable 执行，如微信语音拉起）。
+        - target="contact"：打给紧急联系人
+        - target="120"：老人要打 120 —— MVP 不自主拨，返回诚实话术让他自己按
+        caller(phone, name)->bool 执行实际呼叫（电话通道用号，微信语音通道按名字搜索），失败/超时 → 重试 1 次 → 仍失败 →
+        兜底播报（"自己再试/按120/喊隔壁"），呼叫全程写日志——绝不静默。"""
+        now = now or self.clock()
+        if target == "120":
+            with self._lock:
+                self.call_log.append({"ts": now, "phone": "120", "name": "",
+                                      "target": "120", "status": "fallback",
+                                      "retries": 0,
+                                      "message": "MVP通道不自主拨120，提示老人自拨"})
+                self._save()
+            return {"ok": True, "status": "fallback",
+                    "message": "着急的事您自己按120最稳妥，我这就帮您叫家里人来。"}
+        with self._lock:
+            contact = dict(self.contact) if self.contact else None
+        if not contact:
+            return {"ok": False, "status": "no_contact",
+                    "message": "您的紧急联系人还没设置呢，您先按120，"
+                               "回头跟我说个电话号码，我记好帮您打。"}
+        phone, name = contact["phone"], contact["name"]
+        caller = caller or self._caller     # 未显式传则用注入通道（口语入口与 API 共用）
+        if caller is None:
+            # 无呼叫通道（未接微信/电话 app）：诚实说明，不装打通
+            with self._lock:
+                self.call_log.append({"ts": now, "phone": phone, "name": name,
+                                      "target": "contact", "status": "failed",
+                                      "retries": 0,
+                                      "message": "无呼叫通道（caller未接）"})
+                self._save()
+            return {"ok": False, "status": "failed",
+                    "message": "我现在还接不通电话呢，您自己打给" + name
+                               + "最稳妥，电话" + _format_phone(phone) + "。"}
+        ok, msg, attempts = False, "", 0
+        for attempt in (1, 2):          # 失败 → 重试 1 次 → 兜底，绝不静默
+            attempts = attempt
+            try:
+                ok = bool(caller(phone, name))   # 契约 caller(phone, name)：电话通道用号，微信通道用名
+            except Exception as e:
+                msg = str(e)
+            if ok:
+                break
+        retries = attempts - 1          # 重试次数（首次不算重试）
+        with self._lock:
+            self.call_log.append({"ts": now, "phone": phone, "name": name,
+                                  "target": "contact",
+                                  "status": "dialing" if ok else "failed",
+                                  "retries": retries, "attempts": attempts,
+                                  "message": msg or ""})
+            self._save()
+        if ok:
+            return {"ok": True, "status": "dialing",
+                    "message": "我已经给您打通" + name + "了，您稍等一下。"}
+        return {"ok": False, "status": "failed", "retries": retries,
+                "message": "我打了没接通，您自己再试试"
+                           + _format_phone(phone)
+                           + "，着急就按120、喊喊隔壁邻居，别干等着。"}
+
+    # ---- 口语入口（确定性，供 app.chat_response 调用）----
+    def handle_chat(self, text, call_name="奶奶", now=None):
+        """紧急联络口语闭环（B-11）：一句话接登记/确认/更正/呼叫。
+        返回回复文案；None = 不是紧急联络句式（放行给正常聊天）。
+        - "我儿子电话13812345678" → 复述确认（更正走同一流程，提交即覆盖 pending）
+        - "对/不对"（有 pending 时）→ 确认/重来
+        - "帮我给孩子打电话" → request_call("contact")
+        - "打120" → 诚实标注话术（不自主拨）
+        - "紧急联系人是谁/电话多少" → 查询（老人始终知道名单是谁）
+        """
+        t = str(text or "").strip()
+        if not t or len(t) > 60:
+            return None
+        now = now or self.clock()
+        # ① 复述确认答复优先（登记中途，老人在回答"对不对"）
+        if self.pending and classify_confirm_reply(t)[0] in ("yes", "no") \
+                and not EMERGENCY_CALL_RE.search(t):
+            return self.resolve_confirm(t, now=now)["message"]
+        # ② 紧急呼叫（最高优先级，含 120）
+        if EMERGENCY_CALL_RE.search(t):
+            if _CALL_120_RE.search(t):
+                return self.request_call(target="120", now=now)["message"]
+            return self.request_call(target="contact", now=now)["message"]
+        # ③ 登记/更正：话语里带关系词+11 位号码
+        phone = _extract_phone(t)
+        if phone and (_EMERGENCY_CONTACT_INTENT_RE.search(t)
+                      or re.search(r"儿子|女儿|闺女|孩子|家属|家人|孙子|孙女", t)):
+            rel_m = re.search(r"儿子|女儿|闺女|孙子|孙女|家属|家人", t)
+            relation = rel_m.group(0) if rel_m else ""
+            nm_m = re.search(r"(?:叫|名字是)([\u4e00-\u9fa5]{1,4})"
+                             r"(?=，|。|,|\.|电话|$|号码|的)", t)
+            name = nm_m.group(1) if nm_m else (relation or "家人")
+            return self.submit(name, phone, relation, source="elder", now=now)["message"]
+        # ④ 查询："紧急联系人是谁/电话多少"
+        if re.search(r"紧急联系人(?:是|叫|电话|号码|多少|谁)", t):
+            c = self.get()
+            if c:
+                return ("您的紧急联系人是" + str(c.get("relation", "")) + " "
+                        + str(c.get("name", "")) + "，电话"
+                        + _format_phone(c.get("phone", "")) + "。")
+            return "您的紧急联系人还没设置呢，您跟我说个名字和电话，我这就记上。"
+        return None

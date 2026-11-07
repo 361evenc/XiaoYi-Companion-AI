@@ -156,7 +156,8 @@ from reminder import (ReminderStore, cn_to_int, parse_time_expr, humanize_ts,
                       cancel_ack_message, wont_ack_message, abort_message,
                       capability_message, is_complaint_about_reminder,
                       split_thing_note)
-from memory_system import MemoryBank, match_symptoms, similarity, _char_ngrams
+from memory_system import (MemoryBank, match_symptoms, similarity, _char_ngrams,
+                           EmergencyContactStore)
 import ai_services
 import health_kb
 
@@ -385,14 +386,14 @@ def save_json_safe(file_path, data):
     os.replace(tmp_path, file_path)
 
 def backup_file(file_path):
-    if os.path.exists(file_path):
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_path = os.path.join(BACKUP_DIR, f"{os.path.basename(file_path)}.{timestamp}.bak")
-        shutil.copy2(file_path, backup_path)
-        # 清理旧备份（保留最近5个）
-        backups = sorted([f for f in os.listdir(BACKUP_DIR) if f.startswith(os.path.basename(file_path))])
-        while len(backups) > 5:
-            os.remove(os.path.join(BACKUP_DIR, backups.pop(0)))
+    """B-6：备份委托 BackupManager（原子写+滚动保留7份+访问日志+失败容错）。
+    旧版 shutil.copy2 + os.remove 清理在沙箱/回收站受限环境会崩溃
+    （os.remove 被拦截），BackupManager 的删除失败只记 error 不炸主流程。"""
+    try:
+        import backup_system
+        backup_system.default_manager().backup_file(file_path)
+    except Exception as e:
+        print(f"备份失败（不阻塞主流程）: {file_path} -> {e}")
 
 # ========== 全局记忆事件持久化 ==========
 def load_memory_events():
@@ -1262,6 +1263,19 @@ _n_migrated = memory_bank.import_legacy_events(MEMORY_EVENTS_FILE)
 if _n_migrated:
     print(f"📥 已从旧版关键词事件导入 {_n_migrated} 条情节记忆")
 
+# B-11 紧急联络存储（独立小存储，原子写，不走画像淡忘/剪枝——安全数据）：
+# 登记三路径（老人自报/子女代填/上门代填）+ 逐位复述确认 + 主动呼叫 + 失败无静默
+emergency_contact_store = EmergencyContactStore("emergency_contact.json")
+
+# 呼叫通道注入：桌面微信语音拉起（依赖/窗口缺失时 wechat_voice_call 返回 False，
+# store 层自动走"您自己打"兜底话术，绝不静默）
+try:
+    from backend.services.wechat_caller import wechat_voice_call as _wx_call
+    emergency_contact_store.set_caller(_wx_call)
+    print("📞 紧急联络呼叫通道：微信语音（已接入）")
+except Exception as _e:
+    print(f"📞 紧急联络呼叫通道：未接入（{_e}），呼叫走诚实降级")
+
 # 记忆抽取队列：聊天返回后再后台抽取，不拖慢回复速度
 _memory_queue = deque()
 
@@ -1487,6 +1501,45 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
     if conf_reply is not None:
         save_history = internal_history + [{"role": "user", "content": user_input},
                                            {"role": "assistant", "content": conf_reply}]
+        save_conversation(conv_id, save_history)
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
+    # B-5 显式更正/旧值问句：确定性流程（不调模型，话术写死）——
+    # "我孙子不叫豆豆，叫毛毛" → 值更新+历史保留；"我孙子之前叫啥来着" → 答旧值+补改后值。
+    # 返回 None 才走普通聊天（不编造：没记过/没改过不接管）
+    corr_reply = memory_bank.handle_explicit_correction(user_input, user_memory["call_name"])
+    if corr_reply is not None:
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": corr_reply}]
+        save_conversation(conv_id, save_history)
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
+    # B-4 免看清单口头配置（确定性流程，不调模型）："卧室别看了"→加入免看清单，
+    # "卧室可以看了"→移除。区域认不出（"电视别看了"）返回 None 放行正常聊天。
+    zone_reply = memory_bank.handle_ignore_zone_request(user_input, user_memory["call_name"])
+    if zone_reply is not None:
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": zone_reply}]
+        save_conversation(conv_id, save_history)
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
+    # B-11 紧急联络口语闭环（确定性流程，不调模型）：登记/复述确认/更正/主动呼叫。
+    # "帮我给孩子打电话"/"打120" 优先级最高（呼叫不排队）；
+    # 登记复述优先级在记忆确认之上（紧急号码确认中途，别被别的话题接走）。
+    emergency_reply = emergency_contact_store.handle_chat(
+        user_input, user_memory["call_name"])
+    if emergency_reply is not None:
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": emergency_reply}]
+        save_conversation(conv_id, save_history)
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
+    # B-3 找物三级回答（B-1 PRD §3 话术写死，确定性流程）：graph（我瞅见它了）→
+    # text（您上次说）→ none（我没瞅见+失败后引导），语音播报在前、F-1 屏幕在后。
+    find_res = memory_bank.find_object(user_input, user_memory["call_name"])
+    if find_res is not None:
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": find_res["reply"]}]
         save_conversation(conv_id, save_history)
         return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
@@ -2618,6 +2671,10 @@ def check_active_trigger():
     proactive.py 信号层（_sig_health_followup），并按理念文档补齐冷却、
     免打扰、动机阈值与反馈闭环。"""
     try:
+        # B-11 未设置兜底：紧急联系人没设置 → 每天提醒一次（store 内部控频）
+        nudge = emergency_contact_store.daily_nudge_due()
+        if nudge:
+            return nudge
         return proactive.tick()
     except Exception as e:
         print(f"主动关怀引擎异常: {e}")

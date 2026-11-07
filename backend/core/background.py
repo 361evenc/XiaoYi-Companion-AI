@@ -25,11 +25,24 @@ def _loop(fn, interval_sec, name):
         time.sleep(interval_sec)
 
 
+def _daily_backup():
+    """B-6 每日全量备份（本地滚动 7 份 + 访问日志）+ 备份监控告警。
+    上次成功备份 >24h 时 health() 报 alert，并入 B-4 每日自检（memory/health）。"""
+    import backup_system
+    mgr = backup_system.default_manager()
+    res = mgr.backup_all()
+    h = mgr.health()
+    if h.get("status") == "alert":
+        print(f"[background:backup] ⚠️ 备份告警: {h.get('issues')}（静默失败=没备份）")
+
+
 def start():
     """启动维护类后台线程（重复调用安全）。"""
+    _daily_backup()   # 启动即备份一次（B-6：开机先保一手）
     for fn, interval, name in [
         (engine.clean_old_audio_files, 300, "clean-audio"),
         (engine.prune_old_conversations, 3600, "prune-history"),
+        (_daily_backup, 6 * 3600, "backup"),   # 6h 一轮：>24h 告警线留足余量
     ]:
         threading.Thread(target=_loop, args=(fn, interval, name),
                          daemon=True, name=f"xy-{name}").start()
