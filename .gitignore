@@ -45,6 +45,17 @@ emotion_log.json
 papers/
 paper_notes/
 .paper_notes/
+
+# 验收用真实样本（Wikimedia CC/PD 抓的图 + 合成的电视画面）
+# 不放仓库的三个理由：
+#   ① 体积大、可重新抓（fetch_test_samples.py / tv_frames.py 有完整清单）
+#   ② 里面是老照片、药品包装——虽然是公共授权，但没必要跟着仓库走
+#   ③ 合成图（tv_synth）不能被误当成"真实拍摄证据"流传出去
+# 筛选理由和授权记录在 frames_real/SELECTION.md 与 manifest.json，这两个**入库**。
+vision/frames_real/*
+!vision/frames_real/SELECTION.md
+!vision/frames_real/manifest.json
+
 .paper_reading/
 
 # 本地密钥（不入库，防止公开仓库泄露）

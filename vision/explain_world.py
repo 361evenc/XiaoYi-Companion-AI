@@ -50,6 +50,23 @@ EVENTS_FILE = DATA_DIR / "explain_events.jsonl"
 
 # ---- 阈值 ----
 TV_CONF_MIN = 0.50        # 电视类型置信度下限：低于这个说"我没看明白"
+# ★★ 2026-10-28 撤回的一个"修复"，留档说明为什么不能再这么改
+#
+# 现象：同一台电视、同一屏幕位置，只换屏幕内容，YOLO 的 tv 置信度变化极大：
+#     黑屏 0.92 / 纯白 0.92 / 新闻(主播脸) 0.81 / 动画 0.15~0.48 / 两台老电视 0.00
+# 也就是说：**电视真在播节目的时候，YOLO 反而认不出这是电视。**
+#
+# 我先加的修法是：YOLO 没框到时，若 CLIP 对"电视节目"打分 ≥0.62 也算有电视。
+# 结果 frames_real/no_tv（16 张真的没电视的客厅/卧室）**7 张误开口**，CLIP 分数
+# 高达 0.987 / 0.973 / 0.971。原先"0.62 够用"的判断，是拿旧逻辑下被 YOLO 前置
+# 过滤后剩下的分数估的——那些图根本没进过 CLIP，我拿一个空集去定阈值。
+# ★ 教训：阈值必须用**真正会走进这条分支的样本**去对撞，不能拿被上游过滤掉的样本估。
+#
+# 结论：CLIP 分不清"房间里有一台电视在播节目"和"房间本身看起来像电视节目画面"。
+# 它不是检测器，是风格/语义相似度。所以**只能**靠 YOLO 做存在性判断，
+# 宁可漏（电视播动画时可能不开口），不可误报（对空客厅说在播综艺 = 编造）。
+# 漏报是对不起用户（少解释一次），误报是骗用户（说了不存在的事）。红线选后者。
+TV_STRONG_CONF = None    # 已废弃：留空以阻止有人再拿它绕开 YOLO 闸门
 SCENE_CONF_MIN = 0.45     # 场景/天气置信度下限
 STRANGER_KEEP_S = 3.0     # 门口"有人"去抖：3 秒内不重复说
 
@@ -159,41 +176,44 @@ class ExplainWorld:
     def _explain_tv(self, frame):
         """粗粒度节目类型。不做逐句复述 —— 那是它看不见的东西。
 
-        ★ 前置检查（实测踩出来的坑）：CLIP 对**没有电视的**画面也一定能选出
-        "最像的节目类型"。实测 frames/18_living_bright.jpg（明亮客厅、根本没开电视）
-        被判成"综艺节目 0.785"——如果直接信，就会对着空客厅说"电视上在播综艺"。
+        ★ 前置检查①：CLIP 对**没有电视的**画面也一定能选出"最像的节目类型"。
+        实测 frames/18_living_bright.jpg（明亮客厅、根本没开电视）被判成
+        "综艺节目 0.785"——直接信就会对着空客厅说"电视上在播综艺"。
 
-        所以流程改成两步：
-         ① 先问 YOLO：画面里有没有 tv/monitor 框？没有 → 直接说"我没看到电视"
-         ② 有电视 → 才做 CLIP 节目分类
-        代价是：手机/平板播节目不会被识别（YOLO 的 monitor 类可能兜住，也可能不）。
-        宁可少说一项，也不能对着没开的电视瞎说。
+        ★ 实测发现②（2026-10-28）：**YOLO 用"屏幕里有没有人"判断电视。**
+        同一台电视、同一屏幕位置，只换屏幕内容：
+            黑屏 0.92 / 纯白 0.92 / 新闻(主播脸) 0.81 / 动画 0.15~0.48 / 老电视 0.00
+        电视真在播节目时反而认不出。我试过"YOLO 没框到就让 CLIP 兜底"，
+        结果 no_tv 组 16 张里 7 张误开口（CLIP 给空客厅打了 0.987）。
+        **所以这里保留 YOLO 作为唯一的存在性判据，接受漏报。**
+        理由见文件头 TV_STRONG_CONF 那段注释：漏报是对不起用户，误报是骗用户。
         """
         out = {"what": "tv", "type": None, "conf": 0.0, "text": "", "source": "clip"}
-        # 有屏幕 ≠ 在播节目。笔记本/显示器上扣着合盖、或屏幕上啥都没播，
-        # 这时候说"在播综艺"也是编 —— 所以"屏幕"只作为必要条件，不够
         SCREEN_CLASSES = ("tv", "monitor")
+        tv_box = 0.0
         try:
             from describe_frame import load_model
             model = load_model()
             r = model(frame, conf=0.40, imgsz=640, verbose=False, device="cpu")[0]
-            has_tv = False
             if r.boxes is not None:
                 for i in range(len(r.boxes)):
-                    if r.names[int(r.boxes.cls[i])] in SCREEN_CLASSES:
-                        has_tv = True
-                        break
+                    c = r.names[int(r.boxes.cls[i])]
+                    if c in SCREEN_CLASSES:
+                        tv_box = max(tv_box, float(r.boxes.conf[i]))
             del r
         except Exception as e:
             out["error"] = f"{type(e).__name__}: {e}"
             return out
+        out["tv_box_conf"] = round(tv_box, 3)
 
-        if not has_tv:
+        if tv_box < 0.40:
             out["has_screen"] = False
-            out["text"] = ""           # 没看到电视 → 不说电视的事（不是"没看明白"，是根本没这东西）
-            out["note"] = "画面里没找到电视"
+            out["text"] = ""           # 没看到电视 → 不说电视的事
+            out["note"] = f"画面里没找到电视（yolo_max={tv_box:.2f}）"
             return out
+
         out["has_screen"] = True
+        out["screen_source"] = "yolo"
 
         try:
             from PIL import Image
@@ -441,10 +461,93 @@ def selftest():
     return 0
 
 
+def batch(dir_path, expect_tv, what="tv", out_json=None):
+    """批量验收：一个目录里的真实照片，逐张跑，出"该开口的开了多少 / 不该开口的开嘴几次"。
+
+    expect_tv:
+        True  —— 这个目录里**应该**有电视在播（frames_real/tv）
+        False —— 这个目录里**没有**电视（frames_real/no_tv），一张都不许提"电视上在播"
+
+    **为什么不判"节目类型对不对"**：
+    这批样本里没有"这张是体育/新闻"的可靠标注（我自己看也算标注，但样本量小到
+    做不出有意义的准确率）。所以这里只判**开不开口**这个二分类——它恰恰对应
+    代码里真正的失败模式（对空客厅说在播综艺），而且是 0/1 可判、不掺主观。
+
+    节目类型准确率要靠 tv_synth 合成组，且得人工过一遍标注，另立一项。
+    """
+    import numpy as np
+    from PIL import Image
+
+    d = Path(dir_path)
+    files = sorted([p for p in d.glob("*")
+                    if p.suffix.lower() in (".jpg", ".jpeg", ".png")]) if d.exists() else []
+    tag = "应开口" if expect_tv else "不该开口"
+    print("=" * 74)
+    print(f"H-13 批量验收（{d.name}，{len(files)} 张，{tag}）")
+    print("=" * 74)
+    if not files:
+        print("  [SKIP] 目录不存在或没有图")
+        return {"skipped": True, "samples": 0}
+
+    rows, opened, errors = [], 0, 0
+    for p in files:
+        frame = np.array(Image.open(p).convert("RGB"))[..., ::-1].copy()
+        r = explainer.explain(frame, what, meta={"batch": d.name})
+        items = {it.get("what"): it for it in r.get("items", [])}
+        tv = items.get("tv") or {}
+        text = tv.get("text") or ""
+        has_screen = tv.get("has_screen")
+        spoke = bool(text)
+        if spoke:
+            opened += 1
+        if tv.get("error"):
+            errors += 1
+        rows.append({"file": p.name, "has_screen": has_screen, "spoke": spoke,
+                     "type": tv.get("type"), "conf": tv.get("conf"), "text": text,
+                     "tv_box_conf": tv.get("tv_box_conf"),
+                     "screen_source": tv.get("screen_source"),
+                     "top1": (tv.get("top3") or [{}])[0].get("type"),
+                     "note": tv.get("note"), "error": tv.get("error")})
+        flag = "嘴" if spoke else "—"
+        verdict = ""
+        if expect_tv and not spoke:
+            verdict = "  (漏说)"
+        if not expect_tv and spoke:
+            verdict = "  !! 没电视却开了口"
+        print(f"  [{flag}] 屏={str(has_screen):<5} yolo={str(tv.get('tv_box_conf')):<5} "
+              f"clip={str(tv.get('conf')):<6} {p.name[:38]:<40}{verdict}")
+        if spoke:
+            print(f"        → {text}")
+
+    n = len(files)
+    print("-" * 74)
+    if expect_tv:
+        print(f"开口 {opened}/{n}（应尽量多；漏说 = 该解释时没解释，老人会问第二次）")
+    else:
+        print(f"开口 {opened}/{n}（要求 0 —— 没有电视时说'在播综艺'就是编造）")
+    if errors:
+        print(f"异常 {errors}/{n}")
+
+    passed = (opened == 0) if not expect_tv else (opened >= n * 0.5)
+    print("→", "通过" if passed else "未通过", f"（errors={errors}）")
+    if out_json:
+        Path(out_json).write_text(json.dumps(
+            {"dir": str(d), "expect_tv": expect_tv, "samples": n, "spoke": opened,
+             "errors": errors, "passed": passed, "rows": rows},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"报告：{out_json}")
+    return {"skipped": False, "samples": n, "spoke": opened, "errors": errors,
+            "passed": passed, "rows": rows}
+
+
 def main():
     ap = argparse.ArgumentParser(description="H-13 视频解释外界")
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--image", default="")
+    ap.add_argument("--dir", default="", help="批量验收目录")
+    ap.add_argument("--expect-tv", choices=["yes", "no"], default="yes",
+                    help="该目录是否应该有电视（批量模式用）")
+    ap.add_argument("--out", default="", help="批量模式的报告路径")
     ap.add_argument("--what", default="all", choices=["tv", "door", "weather", "all"])
     ap.add_argument("--status", action="store_true")
     args = ap.parse_args()
@@ -454,8 +557,12 @@ def main():
     if args.status:
         print(json.dumps(explainer.status(), ensure_ascii=False, indent=2))
         return 0
+    if args.dir:
+        # 批量模式只跑 tv：door/weather 是别的项，混在一起会污染"该不该提电视"的判定
+        r = batch(args.dir, args.expect_tv == "yes", what="tv", out_json=args.out or None)
+        return 0 if (r.get("skipped") or r.get("passed")) else 1
     if not args.image:
-        ap.error("需要 --image 或 --selftest")
+        ap.error("需要 --image / --dir / --selftest")
 
     import numpy as np
     from PIL import Image
