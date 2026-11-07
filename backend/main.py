@@ -10,7 +10,8 @@ from fastapi.staticfiles import StaticFiles
 from backend.core import config  # noqa: F401  先切 sys.path 与 CWD
 from backend.core.state import engine
 from backend.core import background
-from backend.api import chat, voice, history, memory, reminder, ws, vision, callvision
+from backend.api import (chat, voice, history, memory, reminder, ws,
+                         vision, callvision, fallsafety)
 
 app = FastAPI(title="小忆陪伴 · 后端服务")
 
@@ -35,6 +36,7 @@ app.include_router(reminder.router)
 app.include_router(ws.router)
 app.include_router(vision.router)   # H-2：录制状态/开关（F-2 指示灯用）
 app.include_router(callvision.router)  # H-12：通话识别结论/删除（无上传帧接口）
+app.include_router(fallsafety.router)  # H-7：跌倒告警状态/转报（无喂帧接口）
 
 
 @app.get("/api/health")

@@ -6,6 +6,7 @@ data/proactive_state.json
 data/memory_sync/
 data/recorder_events.json
 data/user_profile.jsonl
+data/fall_events.jsonl
 
 # 验收脚本的临时产物
 .pytest_cache/
