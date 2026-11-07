@@ -4,6 +4,11 @@ data/perception_summary.json
 data/proactive_queue.jsonl
 data/proactive_state.json
 data/memory_sync/
+data/recorder_events.json
+
+# 验收脚本的临时产物
+.pytest_cache/
+tests/__pycache__/
 
 # 检测结果图
 out/
