@@ -845,7 +845,9 @@ def _clean_search_query(text):
 from html import unescape as _html_unescape
 
 # 触发联网搜索的关键词（时效性/事实性问题）
-SEARCH_TRIGGERS = ["今天", "最新", "新闻", "天气", "现在", "最近", "目前",
+# 不放"今天/现在/最近/目前"这类高频时间词：它们几乎出现在每句闲聊里，会把闲聊
+# 全拉去联网搜索→走更简洁的 DeepSeek，显得话少不亲切。具体时效词仍保留，该搜照搜。
+SEARCH_TRIGGERS = ["最新", "新闻", "天气",
                    "股价", "汇率", "热搜", "奥运会", "世界杯", "几号", "什么时候",
                    "是谁", "谁是", "多少钱", "放假", "台风", "春晚",
                    # 反馈11（任务⑨）：健康求医问药类触发搜索（权威源优先，过滤营销）
@@ -956,16 +958,53 @@ WEATHER_CITY = _load_secret("WEATHER_CITY")   # 可选：城市名（如"北京"
 
 _weather_cache = {"ts": 0.0, "data": None, "city": ""}
 
+# 公网 IP 定位缓存（IP 基本不变，6 小时内复用，减少对外请求）
+_weather_loc = {"city": "", "lat": None, "lon": None, "ts": 0.0}
+_locate_warned = False
+_located_logged = False   # 定位成功后打一次确认日志
+# 英文城市 → 中文（仅用于消息展示；查不到的城市用原名，不影响定位与天气）
+_CITY_ZH = {
+    "changsha": "长沙", "beijing": "北京", "shanghai": "上海", "guangzhou": "广州",
+    "shenzhen": "深圳", "hangzhou": "杭州", "chengdu": "成都", "wuhan": "武汉",
+    "xian": "西安", "xi'an": "西安", "nanjing": "南京", "tianjin": "天津",
+    "chongqing": "重庆", "suzhou": "苏州", "qingdao": "青岛", "dalian": "大连",
+    "ningbo": "宁波", "xiamen": "厦门", "changchun": "长春", "shenyang": "沈阳",
+}
+
 def _detect_city():
-    """公网 IP → 城市名（ip-api.com 免费接口）；失败返回空串"""
-    try:
-        r = http_session.get("http://ip-api.com/json/?language=zh-CN", timeout=5)
-        d = r.json()
-        if d.get("status") == "success":
-            return (d.get("city") or "").strip()
-    except Exception as e:
-        print(f"城市自动定位失败: {e}")
-    return ""
+    """公网 IP → (城市, lat, lon)。主 ipwho.is、备 ipinfo.io（ip-api.com 已弃用：本机不可达）。
+    结果缓存 6 小时；全部失败返回 None，且只打一次日志（不刷屏）。"""
+    global _locate_warned
+    if time.time() - _weather_loc["ts"] < 6 * 3600 and _weather_loc["city"]:
+        return _weather_loc["city"], _weather_loc["lat"], _weather_loc["lon"]
+    try:  # ① ipwho.is（免费无 key，返回 city/latitude/longitude）
+        d = http_session.get("https://ipwho.is/", timeout=6).json()
+        if d.get("success") and d.get("city") and d.get("latitude") is not None:
+            info = (str(d["city"]).strip(), float(d["latitude"]), float(d["longitude"]))
+            _weather_loc.update({"city": info[0], "lat": info[1], "lon": info[2], "ts": time.time()})
+            return info
+    except Exception:
+        pass
+    try:  # ② ipinfo.io（免费版，loc="lat,lon"）
+        d = http_session.get("https://ipinfo.io/json", timeout=6).json()
+        loc = d.get("loc") or ""
+        if d.get("city") and "," in loc:
+            lat_s, lon_s = loc.split(",")[:2]
+            info = (str(d["city"]).strip(), float(lat_s), float(lon_s))
+            _weather_loc.update({"city": info[0], "lat": info[1], "lon": info[2], "ts": time.time()})
+            return info
+    except Exception:
+        pass
+    if not _locate_warned:
+        print("⚠️ 城市自动定位失败（ipwho.is / ipinfo.io 均不可达），天气暂缓，1 小时后自动重试")
+        _locate_warned = True
+    return None
+
+def _city_display(name):
+    """城市名转中文展示：英文城市名查映射，命中用中文，否则用原名"""
+    if not name:
+        return name
+    return _CITY_ZH.get(str(name).strip().lower(), name)
 
 def _open_meteo_geocode(city):
     """城市名 → (lat, lon)；失败返回 None"""
@@ -984,34 +1023,52 @@ _WEATHER_CODES_SNOW = {71, 73, 75, 77, 85, 86}   # Open-Meteo 天气代码：雪
 
 def _weather_refresh_loop():
     """后台线程：每小时拉一次天气，检测 降温≥5℃ / 降雨 / 降雪"""
+    global _located_logged
     while True:
         try:
-            city = WEATHER_CITY or _detect_city()
+            # 优先手动指定城市（WEATHER_CITY），否则按公网 IP 自动定位（直接拿城市+经纬度）
+            if WEATHER_CITY:
+                city, loc = WEATHER_CITY, _open_meteo_geocode(WEATHER_CITY)
+            else:
+                located = _detect_city()
+                if not located:
+                    time.sleep(3600)
+                    continue
+                city, lat, lon = located
+                loc = (lat, lon)
+                if not _located_logged:
+                    print(f"📍 天气自动定位: {_city_display(city)}（{lat:.2f}, {lon:.2f}）")
+                    _located_logged = True
             data = None
-            if city:
-                loc = _open_meteo_geocode(city)
-                if loc:
-                    r = http_session.get("https://api.open-meteo.com/v1/forecast",
-                                         params={"latitude": loc[0], "longitude": loc[1],
-                                                 "past_days": 1, "forecast_days": 1,
-                                                 "daily": "temperature_2m_min,precipitation_sum,weathercode",
-                                                 "timezone": "Asia/Shanghai"},
-                                         timeout=10)
-                    d = (r.json() or {}).get("daily") or {}
-                    if d.get("time") and len(d["time"]) >= 2:
-                        # past_days=1：索引0=昨天，索引1=今天
-                        tmin_y, tmin_t = d["temperature_2m_min"][0], d["temperature_2m_min"][1]
-                        rain = (d["precipitation_sum"][1] or 0) >= 1.0
-                        snow = d["weathercode"][1] in _WEATHER_CODES_SNOW
-                        drop = (tmin_y - tmin_t) if (tmin_y is not None and tmin_t is not None) else 0
-                        if snow:
-                            data = {"kind": "snow", "desc": f"{city}今天可能要下雪，出门注意路滑"}
-                        elif rain:
-                            data = {"kind": "rain", "desc": f"{city}今天可能要下雨，出门记得带伞"}
-                        elif drop >= 5:
-                            data = {"kind": "cold",
-                                    "desc": f"{city}今儿降温约{int(drop)}度，最低{int(tmin_t)}度"}
-            _weather_cache.update({"ts": time.time(), "data": data, "city": city})
+            cur_temp, cur_code = None, None
+            if loc:
+                r = http_session.get("https://api.open-meteo.com/v1/forecast",
+                                     params={"latitude": loc[0], "longitude": loc[1],
+                                             "past_days": 1, "forecast_days": 1,
+                                             "current": "temperature_2m,weathercode",
+                                             "daily": "temperature_2m_min,precipitation_sum,weathercode",
+                                             "timezone": "Asia/Shanghai"},
+                                     timeout=10)
+                resp = r.json() or {}
+                d = resp.get("daily") or {}
+                cur = resp.get("current") or {}
+                cur_temp, cur_code = cur.get("temperature_2m"), cur.get("weathercode")
+                if d.get("time") and len(d["time"]) >= 2:
+                    # past_days=1：索引0=昨天，索引1=今天
+                    tmin_y, tmin_t = d["temperature_2m_min"][0], d["temperature_2m_min"][1]
+                    rain = (d["precipitation_sum"][1] or 0) >= 1.0
+                    snow = d["weathercode"][1] in _WEATHER_CODES_SNOW
+                    drop = (tmin_y - tmin_t) if (tmin_y is not None and tmin_t is not None) else 0
+                    cname = _city_display(city)
+                    if snow:
+                        data = {"kind": "snow", "desc": f"{cname}今天可能要下雪，出门注意路滑"}
+                    elif rain:
+                        data = {"kind": "rain", "desc": f"{cname}今天可能要下雨，出门记得带伞"}
+                    elif drop >= 5:
+                        data = {"kind": "cold",
+                                "desc": f"{cname}今儿降温约{int(drop)}度，最低{int(tmin_t)}度"}
+            _weather_cache.update({"ts": time.time(), "data": data, "city": city,
+                                   "cur_temp": cur_temp, "cur_code": cur_code})
             if data:
                 print(f"🌦️ 天气信号: {data['desc']}")
         except Exception as e:
@@ -1024,6 +1081,45 @@ def get_weather_change():
     if c["data"] and time.time() - c["ts"] < 3 * 3600:
         return c["data"]
     return None
+
+# Open-Meteo 天气码 → 中文（注入定位上下文用；查不到的码只报温度、不报天气）
+_WEATHER_CODE_ZH = {
+    0: "晴", 1: "少云", 2: "多云", 3: "阴",
+    45: "有雾", 48: "有雾凇",
+    51: "有毛毛雨", 53: "有毛毛雨", 55: "毛毛雨较大",
+    56: "冻毛毛雨", 57: "冻毛毛雨",
+    61: "小雨", 63: "中雨", 65: "大雨",
+    66: "冻雨", 67: "冻雨",
+    71: "小雪", 73: "中雪", 75: "大雪", 77: "有雪粒",
+    80: "小阵雨", 81: "阵雨", 82: "强阵雨",
+    85: "小阵雪", 86: "大阵雪",
+    95: "雷阵雨", 96: "雷阵雨伴冰雹", 99: "强雷阵雨伴冰雹",
+}
+
+# 定位/天气类问题：能凭 IP 定位 + 实时天气直接答，不必联网搜索
+#（搜索引擎只有网页、不知道用户 IP，搜"我在哪"只会出一堆没用结果）
+_WEATHER_LOC_Q_RE = re.compile(
+    r"(天气|气温|温度|几度|下雨|下雪|降温|冷不冷|热不热|在哪|哪个城市|哪个省|哪个地方|"
+    r"什么城市|什么地方|所在地|定位|坐标)")
+
+def _is_weather_loc_question(text):
+    return bool(_WEATHER_LOC_Q_RE.search(text or ""))
+
+def _location_weather_line():
+    """拼出注入聊天上下文的位置+天气句；无定位数据返回空串（不注入，零开销）。
+    让小忆能答"我在哪/今天天气"的关键——联网搜索不知道用户 IP、答不了这类，
+    只能靠这里把 IP 定位到的城市 + 当前气温直接递到小忆嘴边。"""
+    c = _weather_cache
+    city = _city_display(c.get("city") or "")
+    if not city:
+        return ""
+    line = f"【位置与天气】老人现在所在的地区是{city}。"
+    t, code = c.get("cur_temp"), c.get("cur_code")
+    if t is not None:
+        wzh = _WEATHER_CODE_ZH.get(code, "")
+        line += f"当前气温大约{int(round(t))}度" + (f"，{wzh}" if wzh else "") + "。"
+    line += "老人问到位置、所在城市或天气时，直接按上面的信息如实回答，不要说不知道，也不要转去查网页。"
+    return line
 
 Thread(target=_weather_refresh_loop, daemon=True, name="weather").start()
 
@@ -1347,6 +1443,12 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
                        f"（例如：{call_name}，您今天气色真好），"
                        f"绝对不能把TA叫成「{wrong_call}」。")
 
+    # IP 定位 + 实时天气：直接写进 system。联网搜索不知道用户 IP，答不了
+    # "我在哪/今天天气"，得靠这里把城市+当前气温递到小忆嘴边（无数据则空串零开销）
+    _loc_line = _location_weather_line()
+    if _loc_line:
+        system_content += "\n" + _loc_line
+
     # 记忆检索（三因子：新近性×重要性×相关性）移到下方"模型通道决定"之后按通道注入：
     # DeepSeek 用全量（4 事实+2 经历+1 反思），本地 3B 减半（2+1）——小模型记太多会念出来
 
@@ -1455,12 +1557,15 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
     _hot_ctx = hotlist_context(user_input)
     if _hot_ctx:
         search_context = "\n\n" + _hot_ctx
-    elif needs_search(user_input):
+    elif needs_search(user_input) and not (_loc_line and _is_weather_loc_question(user_input)):
+        # 定位/天气问题直接凭上面注入的【位置与天气】回答：联网搜索不知道用户 IP，
+        # 搜"我在哪/今天天气"只会出一堆无用结果，跳过搜索
         refs = search_and_summarize(_clean_search_query(user_input))
         if refs:
             search_context = (
                 "\n\n[网络搜索参考资料（回答要求：1.资料里有的具体信息——温度、日期、数字、人名等——"
-                "必须直接转述给老人，不许说查不到；2.用口语化中文、一两句话说重点；"
+                "必须直接转述给老人，不许说查不到；2.用口语化中文，把关键信息说清楚即可"
+                "（一般两三句话，别把整页资料念给老人）；"
                 "3.资料确实没提到才可以说不知道，并给贴心的通用建议）]\n" + refs
             )
 
@@ -1544,6 +1649,11 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
 
     if not bot_reply:
         bot_reply = f"{call_name}，我有点听不清楚，您再说一遍好吗？"
+
+    # Markdown 清理：回复走纯文本显示且要 TTS 读出来，###标题/-列表/**加粗**
+    # 这类排版符号会原样显示或被念出来（2026-10-31 实测 3B/DeepSeek 答健康题
+    # 都爱带 ### 和 - 列表，客户 10.23 反馈的"念清单"感由此而来）
+    bot_reply = _strip_markdown(bot_reply)
 
     # 性别称呼保险丝：模型若仍叫错（爷爷↔奶奶），按呼语规则确定性纠正
     bot_reply = fix_address(bot_reply, call_name, gender, surname)
@@ -2426,14 +2536,20 @@ PROMPT_HUMOR = "你是小忆，一位活泼开朗、风趣俏皮的晚辈。语�
 PROMPT_CARING = "你是小忆，一位温柔细腻、共情暖心的晚辈。语气温柔舒缓，善于倾听与安抚。"
 
 # ========== 反馈11：提示词工程（任务⑤⑧⑨⑩） ==========
-# 任务⑤：风格硬约束——短句、口语、不反问、不罗列（去"人机感"的根）
+# 任务⑤：风格约束——口语、不反问、不念清单（去"人机感"的根）
+# 2026-10-31 两轮反馈两次定案（"对话还不如以前"→"回复还是很少"）：
+# - 原先"一次最多两句、每句不超20字"硬上限把回答逼成几个字——删掉
+# - 第一轮又误加"闲聊一两句就行"，老人分享心情/今天的事被压薄——再删掉
+# 定案：纯打招呼可简短；分享心情/今天的事要热乎接住（把TA说的点都接上、
+# 再追问一句，两三句到四五句）；问事/问健康/让说全要把话说全（四五句都行）。
 STYLE_RULES = """
 【说话方式（必须遵守）】
-- 一次最多说两句，每句不超过20个字，像家里人唠嗑。
-- 全程口语，禁用书面词："此外、首先、其次、总之、建议您、需要注意的是"都不许出现。
+- 全程口语，像家里人唠嗑，禁用书面词："此外、首先、其次、总之、建议您、需要注意的是"都不许出现。
 - 不许反问老人（"您觉得呢？""您说是不是？"禁用），不许给老人出选择题。
-- 不许列条目（1234、破折号罗列、冒号清单都禁用），想到什么说什么。
 - 不说"作为一个AI/助手"，你就是小忆，是家里的晚辈。
+- 纯打招呼可以简短；但老人分享今天的事、心情、吃了啥、谁陪了TA时，要热乎地接住：顺着TA的高兴说，把TA提到的点都接上（心情、饭、家里人），再追问一句细节或带出自己的感受，两三句到四五句，别一两句话就结束，也别翻来覆去啰嗦。
+- 别像念清单一样列条目（1234、破折号罗列、冒号清单都禁用，也不许用 # * - 这类排版符号，就用大白话写）。
+- 但老人提问、问"怎么办/怎么弄/怎么回事"、问健康、或者明确让你"说得全一点"时，要把话说全：具体怎么做、注意哪些，三四句、五六句都行，知道你啥就说啥，别只回几个字。
 """
 # 任务⑤：三人格口语示例（few-shot——老人实际对话风格）
 PERSONA_EXAMPLES = {
@@ -2473,8 +2589,14 @@ ASR_TOLERANCE_PROMPT = ("【语音识别提示】老人的话来自语音识别�
                         "（比如\"降压要\"其实是\"降压药\"、\"孙志\"其实是\"孙子\"），"
                         "按发音理解意思就好，别纠结错字，更别复述错字。")
 # 任务⑨：医疗安全边界
+# 2026-10-31 放宽：原先"只给生活上的提醒和宽慰"把知识库/搜索里的具体健康知识
+# 也压住了，老人问健康时听不到干货（客户反馈"医学知识没有体现"）。
+# 改为：健康常识（饮食/起居/锻炼/防跌倒/慢病日常）可以说具体，硬边界保留
+# （不下诊断、不推荐新药、不给剂量、严重症状劝就医）。
 MEDICAL_SAFETY_PROMPT = ("【健康话题安全边界】聊到症状、用药、看病时："
-                         "1.只给生活上的提醒和宽慰，不下诊断、不推荐新药、不给具体剂量；"
+                         "1.健康常识可以给具体的：饮食忌口、日常起居、锻炼散步、防跌倒、"
+                         "慢性病日常注意，用你手里的参考资料说得实在具体，别空着；"
+                         "但不下诊断、不推荐新药、不给具体剂量，拿不准的用药问题劝他问医生；"
                          "2.情况听着严重（胸口疼、头晕摔倒、说话不清）时，马上劝他打120"
                          "或叫家里人，语气要肯定不许犹豫；"
                          "3.老人正在吃的药可以提，没听他说过的药不提。")
@@ -2505,6 +2627,22 @@ def get_call_name(surname, gender):
     if s:
         return f"{s}{'奶奶' if gender == '女' else '爷爷'}"
     return "奶奶" if gender == '女' else "爷爷"
+
+def _strip_markdown(text):
+    """Markdown 排版 → 纯口语文本（2026-10-31）：回复纯文本显示且要 TTS 念出来，
+    ###标题、- 列表、**加粗** 等排版符号会原样显示或被念出。
+    只去排版、保留文字；标记只认行首，不误伤正文中的符号。"""
+    if not text:
+        return text
+    lines = []
+    for line in str(text).splitlines():
+        s = re.sub(r"^\s{0,3}#{1,6}\s*", "", line)       # 标题
+        s = re.sub(r"^\s*[-*+]\s+", "", s)               # 无序列表
+        s = re.sub(r"^\s*\d+[.、)]\s*", "", s)           # 有序列表
+        s = s.replace("**", "").replace("__", "").replace("`", "")
+        s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", s)   # 链接→留文字
+        lines.append(s.rstrip())
+    return "\n".join(lines)
 
 def fix_address(reply, call_name, gender, surname=""):
     """性别称呼保险丝：模型叫错（爷爷↔奶奶）时确定性纠正。

@@ -1,0 +1,89 @@
+机器视觉线（端侧感知）—— 新增目录 vision/
+==================================================
+
+一、这次加了什么
+--------------------------
+在仓库根目录新增 vision/，把机器视觉线的全部代码、数据、文档按功能分类归档。
+不影响 backend/ 、frontend/ 任何现有文件，不改小忆主流程一行代码。
+
+目录分类：
+  vision/*.py       12 个脚本 + 1 个启动 bat（虚拟帧源 / 三源切换 / 检测描述 /
+                    落库服务 / 查询接口 / 记忆桥 / 主动信号 / CLIP / 评测 / 验收）
+  vision/data/      样例数据（文件名带 .sample.，含逐帧 JSONL、窗口汇总、主动队列、标注）
+  vision/models/    权重存放目录（只放 README，yolov8n.pt 按需自取，约 6.2MB）
+  vision/frames/    21 张测试图集（室内外混合，含明暗/远近/多目标）
+  vision/docs/      任务卡、业务词映射表、真机切换预案、评测报告、验收记录
+  vision/logs/      24 小时长稳跑原始日志（42,123 行，gzip 后 388KB）
+  vision/README.md  总览：怎么跑、数据格式、验收状态、已知限制、对接点
+
+说明：.py 全部扁平放在 vision/ 下，没有分 src/。原因是代码里用
+HERE = Path(__file__).resolve().parent 定位 data/ 和 frames/，
+脚本一旦挪进子目录就会找不到图集；而且仓库根目录本身也是扁平放 .py 的风格。
+
+
+二、为什么单独放一个目录，不并进 backend/
+--------------------------
+1. 视觉线独占一套依赖。ultralytics 会改动 numpy / pillow 版本，
+   装进小忆主环境有把主服务跑挂的风险（实测主环境 torch 与视觉线 torch 不同源）。
+   → 视觉线自带 requirements.txt，单独 venv。
+2. 视觉线可以脱离小忆独立运行、独立验收。放 backend/ 下会被误认为依赖主服务。
+3. 与小忆的对接只有三个入口（README 末尾有表），不需要目录耦合。
+
+
+三、怎么验证（不需要跑满 24 小时）
+--------------------------
+  cd vision
+  ..\venv\Scripts\python.exe perception_service.py --source sim --interval 2 --duration 0.02
+
+  注意 --duration 单位是【小时】，0.02 约 72 秒。跑完再执行：
+  ..\venv\Scripts\python.exe perception_query.py --latest
+
+预期：落库约 30 帧，输出若干条窗口汇总，查询能返回最新一条感知结果。
+24 小时那项的原始日志在 vision/logs/run_24h.log.gz，可直接解压核对首末行。
+
+
+四、顺带修的两个问题（原始版本里有）
+--------------------------
+1. start_24h.bat 里写死了 D:\xiaoyi\XiaoYi-Companion-AI-main\venv\...\python.exe，
+   别人克隆下来必然跑不了。已改成：先找同级 venv，再找上级 venv，最后退回 PATH 里的 python。
+2. 权重缺失时 ultralytics 会自动去 github.com 下载，在 github.com 不通的网络里
+   会静默挂起数分钟、看起来像程序卡死（实测挂满 3 分钟无任何提示）。
+   已在 describe_frame.py 增加 load_model()：先检查文件，缺失直接报错并打印补法。
+   perception_service.py 与 describe_frame.py 都改用这个函数。
+
+
+四、验收状态（截至 2026-10-31）
+--------------------------
+  ① 虚拟帧源        通过  8/8 自动检查 + 24.00 小时长稳跑，0 报错
+  ② 检测+结构化描述  通过  稳态 28-33 ms/帧（纯 CPU）
+  ③ 落库/汇总/查询   通过  接小忆记忆库有一处待对方支持（见下）
+  ④ 主动信号+冷却    通过  三层冷却实测生效
+  ⑤ CLIP 零样本      部分  室内外 20/21 可用；天气 58%，判定不可用
+  ⑥ 真机切换        通过  本机摄像头实跑通过；无自动重连/看门狗
+  ⑦ 评测            部分  召回 96%(22/23)、精确 71%(22/31)，仅 21 张
+
+
+五、需要小忆侧配合的两处（不是视觉线能单独改完的）
+--------------------------
+1. 记忆系统缺 source 字段。
+   memory_system.py 的 import_legacy_events 只存 field，build_chat_context
+   一律渲染成"老人提过"。感知事件写进去会变成"老人提过：看到有人"，语义是错的。
+   → 视觉线已默认只写本地 sidecar（perception_bridge.py 的 data/memory_sync/），
+     没有污染主记忆库。改法写在该文件末尾「已知缺陷」段落，约 6 行。
+2. 主动消息需要一个播报入口。
+   proactive_signal.py 只产出候选队列（data/proactive_queue.jsonl），
+   是否真的说出来交给对话层决定，需要有人接。
+
+
+六、没有上传的东西（有意排除）
+--------------------------
+  venv/                 依赖环境，各机器自建
+  models/yolov8n.pt     6.2MB 权重，按需自取（见 vision/models/README.md）；
+                        .gitattributes 里 *.pt 走 LFS，避免占团队 LFS 配额
+  out/                  24 张画框结果图，6.1MB，跑 detect_batch.py 可再生
+  run_24h.log 原文      4.49MB 文本，已压成 .gz 放 vision/logs/
+  __pycache__/
+
+==================================================
+维护：硬件实体负责人（机器视觉线）
+最后更新：2026-10-31

@@ -1,0 +1,25 @@
+# 运行时产物，不要提交
+data/world_perception.json
+data/perception_summary.json
+data/proactive_queue.jsonl
+data/proactive_state.json
+data/memory_sync/
+
+# 检测结果图
+out/
+
+# 权重（见 models/README.md，走 .gitattributes 的 LFS 规则但按需自取）
+models/*.pt
+models/*.pth
+models/*.bin
+models/*.safetensors
+
+# 本地环境
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# 运行时日志
+*.log
+!logs/*.log.gz

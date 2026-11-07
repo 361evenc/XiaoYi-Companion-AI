@@ -1,0 +1,17 @@
+# 机器视觉线（端侧感知）依赖
+# 与本仓 backend/requirements.txt 相互独立：视觉线的 torch/ultralytics 会改动
+# numpy/pillow 版本，装进小忆主环境有把主服务跑挂的风险。
+# 建议单独建 venv：
+#   python -m venv venv
+#   venv\Scripts\pip install -r vision/requirements.txt
+#
+# 注意：实测环境为 CPU 版 torch，无 CUDA。
+# 若要装 CPU 版，先执行：
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+ultralytics>=8.4,<9        # YOLOv8 检测（自带 opencv-python / numpy / pillow）
+numpy>=2.0
+Pillow>=10
+
+# 仅 ⑤ CLIP 零样本需要，其余模块不必装（权重约 577MB）
+# open-clip-torch>=3.3
