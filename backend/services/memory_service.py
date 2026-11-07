@@ -93,3 +93,75 @@ def emotion_chart():
         print(f"[memory_service] 心情曲线失败: {e}")
         path = None
     return {"image_url": voice_service.audio_url(path)}
+
+
+def search(q, by="object", k=10):
+    """统一记忆检索（B-5）：按人 person / 按物 object / 按场景 scene 三维检索。
+    供 F-4 时间线、B-8 盲盒等调用。返回 {"ok", by, query, resolved, results}。"""
+    q = str(q or "").strip()
+    by = str(by or "").strip().lower() or "object"
+    if not q:
+        return {"ok": False, "message": "您想翻翻啥呀？跟我说说——人、东西还是地方～"}
+    try:
+        out = engine.memory_bank.search(q, by=by, k=k)
+    except Exception as e:
+        print(f"[memory_service] 检索失败: {e}")
+        return {"ok": False, "message": "检索时出了点问题，请稍后再试。"}
+    out["ok"] = True
+    return out
+
+
+def correct(key, new_value, old_value="", quote=""):
+    """显式更正（B-5）：值即时生效、旧值入 history 保留可查（不是物理删）。
+    老人语音端的更正已由 chat_response 的确定性分支接住；本接口供程序化调用与测试。"""
+    key, new_value = str(key or "").strip(), str(new_value or "").strip()
+    if not key or not new_value:
+        return {"ok": False, "message": "key 和 new_value 都不能为空。"}
+    try:
+        res = engine.memory_bank.correct_fact(
+            key=key, new_value=new_value, old_value=str(old_value or "").strip() or None,
+            quote=str(quote or "").strip())
+    except Exception as e:
+        print(f"[memory_service] 更正失败: {e}")
+        return {"ok": False, "message": "更正时出了点问题，请稍后再试。"}
+    if res is None:
+        return {"ok": False, "message": "没找到要更正的事，也建不了新条目。"}
+    res["ok"] = True
+    return res
+
+
+def health():
+    """记忆箱健康自检（B-4 audit，B-10 报告"记忆箱健康"项数据源）：
+    条目数 / 视觉重复堆积 / 敏感词命中 / 拦截统计 / 免看清单。
+    B-6 并入"备份健康"（备份监控：上次成功 >24h 告警——静默失败=没备份）。"""
+    try:
+        out = engine.memory_bank.health_audit()
+    except Exception as e:
+        print(f"[memory_service] 健康自检失败: {e}")
+        return {"ok": False, "message": "自检时出了点问题，请稍后再试。"}
+    out["ok"] = True
+    # B-6 备份健康项（并入每日自检，B-10 报告收口）
+    try:
+        import backup_system
+        out["backup"] = backup_system.default_manager().health()
+    except Exception as e:
+        out["backup"] = {"status": "warn", "issues": [f"backup_check_failed: {e}"]}
+    return out
+
+
+def find_object(text):
+    """找物三级回答（B-3，契约按 B-1 PRD §4）：graph（视觉条目）→ text（您说过）
+    → none（诚实兜底）。不是找物话语 → matched=False（调用方转正常聊天）。"""
+    text = str(text or "").strip()
+    if not text:
+        return {"ok": False, "matched": False, "message": "您想找啥呀？跟我说说～"}
+    try:
+        res = engine.memory_bank.find_object(text)
+    except Exception as e:
+        print(f"[memory_service] 找物失败: {e}")
+        return {"ok": False, "matched": False, "message": "找的时候出了点问题，请稍后再试。"}
+    if res is None:
+        return {"ok": False, "matched": False, "message": "不是找物提问。"}
+    res["ok"] = True
+    res["matched"] = True
+    return res

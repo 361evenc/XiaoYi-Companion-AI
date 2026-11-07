@@ -1,0 +1,77 @@
+# B-11 紧急联络 + B-6 备份加固 · 修改说明（2026-11-06）
+
+> 后端剩余可独立落地任务：B-11（P0 主动呼叫）+ B-6（数据安全本机子集）。
+> B-2 spike 需摄像头长跑+H-5 知情同意家庭；B-6 律师审查/异地云桶属团队外部动作，
+> 均不在本次代码范围（B-6 文档侧条款待律师报价后补）。
+
+## 一、B-11 紧急联络（P0 主动呼叫部分）
+
+### 代码落点
+- `memory_system.py` 末尾新增 `EmergencyContactStore` 类 + 口语正则
+  （`EMERGENCY_CALL_RE` / `_extract_phone` 中文数字归一 / `_format_phone` 逐位复述格式）
+- `app.py`：
+  - 全局 `emergency_contact_store = EmergencyContactStore("emergency_contact.json")`
+  - `chat_response` 钩子（B-3 找物之前、记忆确认之后——紧急呼叫不排队）
+  - `check_active_trigger()` 并入 `daily_nudge_due()`（未设置每天提醒一次）
+- 新增 `backend/services/emergency_service.py` + `backend/api/emergency.py`：
+  - `GET  /api/emergency`（状态）/ `POST /api/emergency/contact/submit`（三路径登记）
+  - `POST /api/emergency/contact/confirm`（复述确认）/ `POST /api/emergency/call`（呼叫）
+- 路由已注册进 `backend/main.py`
+
+### 任务卡验收对应
+| 验收标准 | 实现 | 测试 |
+|---|---|---|
+| 登记+复述确认+更正三路径可用（各3遍） | submit→resolve_confirm（elder/child/staff 仅 source 不同，全走复述） | TestRegistration ×3 遍循环 |
+| 语音紧急呼叫触发 10/10 | handle_chat 正则 + request_call | TestCallTrigger 10/10 |
+| 呼叫失败重试+兜底播报无静默 | 重试1次→兜底话术（含"按120/喊邻居"），call_log 全记录 | TestCallFailure |
+| 复述确认100%执行 | 无 pending 绝不落库；确认超时10分钟作废 | 确认超时/none 分支 |
+| 不自主拨120（诚实标注） | target=120 → "您自己按120最稳妥" | fallback 分支+日志 |
+| 未设置每日提醒兜底 | daily_nudge_due() 24h 控频 | TestDailyNudge |
+
+被动转报（P1）依赖 B-9/H-7，未做（按任务卡里程碑）。
+Gate G5 的"3 户实测登记成功率"需真机环境，本次不覆盖。
+
+### 关键设计
+- **独立小存储** `emergency_contact.json`：不走 facts/episodes——紧急联系人是安全数据，
+  不受画像淡忘/剪枝（300/200条上限）影响；原子写（tmp+os.replace）。
+- **复述话术**：逐位格式 `138-1234-5678` + 一位一位念全文（任务卡："听岔常在后两位"）。
+- **呼叫通道**：MVP 用 `caller` callable 注入（微信语音拉起等），未接通时诚实降级——
+  "我现在还接不通电话呢，您自己打给X最稳妥，电话…"——绝不装打通。
+
+## 二、B-6 备份加固（数据安全本机子集）
+
+`backup_system.py`（骨架已有，本次补接入与验收）：
+- `backup_system.DEFAULT_BACKUP_FILES` 加入 `emergency_contact.json`（B-11 安全数据必须可恢复）
+- `app.backup_file()` 从旧版 shutil.copy2+os.remove 迁移为委托 BackupManager——
+  **修复启动崩溃**：旧版清理在沙箱/受限环境 os.remove 被拦截直接炸主流程；
+  BackupManager 删除失败只记 error 不阻塞
+- `backend/core/background.py`：新增 `_daily_backup()`（启动即备份一次 + 6h 循环），
+  >24h 无成功备份打印告警（静默失败=没备份）
+- `backend/services/memory_service.health()` 并入 `backup` 健康项（B-4 每日自检收口，
+  B-10 报告"备份健康"数据源）
+
+### 验收对应（B-6 验收第3条：备份/恢复/监控/日志）
+| 验收点 | 测试 |
+|---|---|
+| 备份实际跑通 | TestBackupAndKeep（含滚动保留7份） |
+| 恢复演练一次（真恢复一份） | TestRestoreDrill.test_restore_latest |
+| 损坏备份拒恢复（坏备份不覆盖好数据） | test_corrupt_backup_rejected |
+| 备份监控（模拟>24h失败→告警） | TestHealthMonitor（never/stale/ok/offsite 四态） |
+| 访问日志有实际写入（backup/restore 可审计） | TestAccessLogAndAtomic |
+| 原子写（无 .tmp 残留、state 完整可解析） | test_no_tmp_left / test_state_json_parses |
+
+异地备份：配置位 `XIAOYI_BACKUP_REMOTE`（移动硬盘/加密云桶路径），未配置 → health 报 warn
+（SOP：移动硬盘交指定亲属每周更新）。律师审查/云桶开通属团队外部动作，待 B-6 第1周报价。
+
+## 三、测试与回归
+
+- 新增 `test_emergency_contact.py`（22 用例）、`test_backup_system.py`（17 用例）
+- 全量回归 80 用例全绿（find_object / memory_search / write_rules / emergency / backup）
+- 冒烟：`import app` 正常（旧启动崩溃已消除）、`/api/emergency*` 4 条路由注册成功、
+  备份 health="warn"（仅提示未配异地，预期行为）
+
+## 四、遗留（不在本次范围）
+- B-2 spike（需摄像头 + 3 件真实物品 + 知情同意环境）
+- B-6 律师审查 / 三张表文档 / 身后数据政策文档（文档侧，待团队排期）
+- B-11 被动转报（P1，依赖 B-9 通道 + H-7）
+- H-6 实测后 Gate G5"3 户登记成功率 100%"复核

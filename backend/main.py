@@ -10,7 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from backend.core import config  # noqa: F401  先切 sys.path 与 CWD
 from backend.core.state import engine
 from backend.core import background
-from backend.api import chat, voice, history, memory, reminder, ws
+from backend.api import chat, voice, history, memory, reminder, ws, emergency
 
 app = FastAPI(title="小忆陪伴 · 后端服务")
 
@@ -32,6 +32,7 @@ app.include_router(voice.router)
 app.include_router(history.router)
 app.include_router(memory.router)
 app.include_router(reminder.router)
+app.include_router(emergency.router)
 app.include_router(ws.router)
 
 
