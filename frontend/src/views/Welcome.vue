@@ -42,6 +42,11 @@
 
         <p v-if="error" class="error-tip">{{ error }}</p>
       </form>
+
+      <!-- F-7 子女端入口：同一 PWA 的角色切换，放在欢迎页底部，老人侧栏不放 -->
+      <button class="child-entry" type="button" @click="$router.push('/child')">
+        👨‍👩‍👧 我是子女，看看老人的近况
+      </button>
     </main>
   </div>
 </template>
@@ -212,5 +217,19 @@ async function start() {
   color: var(--color-danger);
   font-size: var(--font-body);
   text-align: center;
+}
+.child-entry {
+  margin-top: 16px;
+  min-height: var(--btn-height);
+  padding: 10px 16px;
+  font-size: var(--font-body);
+  color: var(--color-accent2);
+  background: none;
+  border: 1px dashed var(--color-accent2);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+.child-entry:hover {
+  background: #EEF4F0;
 }
 </style>

@@ -350,6 +350,12 @@ class RecordingController:
                 wait = max(0.0, interval - elapsed)
                 self._stop_flag.wait(wait)
 
+        except SystemExit as e:
+            # load_model() 缺权重时会 sys.exit(1)。SystemExit 继承 BaseException，
+            # 不会被下面的 except Exception 捕获；以前它会直接漏到 finally，
+            # 被 finally 兜底写成 released —— 启动明明失败了，却报"已停"。
+            # 现在单独拦下来：启动阶段退出 = 没开起来，必须落 fault。
+            self._set(ST_FAULT, f"录制线程异常退出（启动阶段退出，code={e.code}）")
         except Exception as e:      # noqa: BLE001  启动失败要落到状态里
             self._set(ST_FAULT, f"录制线程启动失败：{e}")
         finally:
@@ -361,8 +367,16 @@ class RecordingController:
                     pass
             with self._lock:
                 self._source = None
-            if self._state != ST_FAULT:
-                self._set(ST_RELEASED, "已停止并释放设备")
+                stopping = self._stop_flag.is_set()
+                st = self._state
+            # ★ 只有"用户主动 stop"（stop_flag 已置）才算已停。
+            #   其它任何退出（异常 / SystemExit / 未知原因）都不能写 released：
+            #   没经过停止流程就报"已停"、confirmed_off=true，就是假装关了。
+            if stopping:
+                if st != ST_RELEASED:
+                    self._set(ST_RELEASED, "已停止并释放设备")
+            elif st != ST_FAULT:
+                self._set(ST_FAULT, "录制线程意外退出，未确认设备已释放")
 
 
 # 进程内单例

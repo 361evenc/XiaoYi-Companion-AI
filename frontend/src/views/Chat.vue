@@ -11,6 +11,21 @@
 
       <!-- 右侧聊天区 -->
       <section class="app-chat">
+        <!-- F-7 子女远程安心：首次激活，大字 + 语音明确告诉老人孩子能看到什么 -->
+        <div v-if="careNotice" class="care-notice" role="alertdialog" aria-live="assertive">
+          <p class="care-notice-title">跟您说个事儿</p>
+          <p class="care-notice-text">
+            您的孩子能看到您的<b>吃药和心情概况</b>，<b>看不到聊天内容</b>。您要是不同意，可以随时关掉。
+          </p>
+          <div class="care-notice-actions">
+            <button type="button" class="btn btn-primary" @click="acceptCareNotice">我知道了</button>
+            <button type="button" class="btn btn-secondary" @click="declineCareNotice">不让看</button>
+          </div>
+        </div>
+
+        <!-- F-2：录制状态文字提示 + 一键停；首次进入先告知再开 -->
+        <VisionStatus ref="visionRef" />
+
         <!-- 人格切换：影响小忆说话音色 -->
         <div class="voice-toolbar">
           <span class="voice-label">小忆性格</span>
@@ -24,6 +39,33 @@
               @click="setPersonality(p)"
             >
               {{ p }}
+            </button>
+          </div>
+        </div>
+
+        <!-- F-8 方言：能听懂的才可选；还没学会的点了就诚实说「还没学会」，不硬上 -->
+        <div class="voice-toolbar">
+          <span class="voice-label">小忆听</span>
+          <div class="persona-row">
+            <button
+              type="button"
+              class="persona-chip"
+              :class="{ on: session.dialect === '普通话' }"
+              @click="chooseDialect('普通话')"
+            >
+              普通话
+            </button>
+            <button
+              v-for="d in dialectOptions"
+              :key="d.name"
+              type="button"
+              class="persona-chip"
+              :class="{ on: session.dialect === d.name, 'dialect-not-yet': !d.supported }"
+              :title="d.supported ? '' : d.reason"
+              @click="chooseDialect(d.name)"
+            >
+              {{ d.name }}
+              <span v-if="!d.supported" class="not-yet-tag">还在学</span>
             </button>
           </div>
         </div>
@@ -47,9 +89,39 @@
           <span class="caption-text">{{ caption }}</span>
         </div>
 
+        <!-- 找物结果卡：语音先说、屏幕后展示；下一轮对话自动收起 -->
+        <FindObjectCard
+          v-if="findResult && findVisible"
+          :data="findResult"
+        />
+
+        <!-- F-5 反向索求任务卡：大字请老人说天气；前奏音只在“好事”播报前响 -->
+        <ReverseAskCard
+          :answered="weatherAnswered"
+          :answer-text="weatherAnswer"
+          @ask="askWeather"
+        />
+
+        <!-- F-6 拍后反馈：只提示“太暗 / 太糊”；可以重拍，也允许照发 -->
+        <div v-if="photoWarn" class="photo-warn card" aria-live="polite">
+          <span class="photo-warn-icon" aria-hidden="true">
+            {{ photoWarn.verdict === 'dark' ? '💡' : '📷' }}
+          </span>
+          <p class="photo-warn-text">{{ photoWarn.message }}</p>
+          <div class="photo-warn-actions">
+            <button type="button" class="btn btn-primary" @click="retakePhoto">
+              📸 重新拍一张
+            </button>
+            <button type="button" class="btn btn-secondary" @click="sendPendingPhoto">
+              还是要发
+            </button>
+          </div>
+        </div>
+
         <audio ref="audioEl" class="hidden-audio" @ended="audioPlaying = false" />
 
         <InputCard
+          ref="inputRef"
           :muted="session.isMuted"
           @send="sendMessage"
           @quick="sendMessage"
@@ -66,14 +138,21 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { useSessionStore } from '../stores/session'
 import { api } from '../api'
 import SidebarCards from '../components/SidebarCards.vue'
 import ChatBubble from '../components/ChatBubble.vue'
+import FindObjectCard from '../components/FindObjectCard.vue'
 import InputCard from '../components/InputCard.vue'
+import VisionStatus from '../components/VisionStatus.vue'
+import ReverseAskCard from '../components/ReverseAskCard.vue'
+import { warm } from '../services/warmDependency'
+import { photoGuide } from '../data/photoGuide'
 
 const session = useSessionStore()
+const route = useRoute()
 
 const personalities = ['踏实务实', '风趣幽默', '暖心知心']
 
@@ -103,6 +182,82 @@ const error = ref('')
 const audioEl = ref(null)
 const caption = ref('')
 const audioPlaying = ref(false)
+const visionRef = ref(null)
+const inputRef = ref(null)
+
+// F-6 拍后反馈：存着待发送的那张图（老人选"重新拍"就丢弃，选"还是要发"才发）
+const photoWarn = ref(null)
+
+// F-5：反向索求（天气）当天状态，从本地契约读，刷新页面也不丢
+const weatherAnswered = ref(warm.weatherAnsweredToday())
+const weatherAnswer = ref(warm.getWeatherAnswer())
+
+// F-7：首次激活的告知开关（大字 + 语音；老人始终知道孩子能看到什么）
+const careNotice = ref(false)
+
+// F-8：方言选项全部来自后端闸门；supported=false 的只展示「还在学」，不可切过去
+const dialectOptions = ref([])
+
+async function loadDialectConfig() {
+  try {
+    const res = await api.dialectConfig()
+    const d = res.data || {}
+    dialectOptions.value = d.options || []
+    // 之前选过的方言如果已经不在上线清单（闸门收紧），回到普通话
+    const cur = dialectOptions.value.find((o) => o.name === session.dialect)
+    if (session.dialect !== '普通话' && (!cur || !cur.supported)) {
+      session.setDialect('普通话')
+    }
+  } catch (e) {
+    // 方言配置读不到不影响聊天：保持普通话，下一轮再取
+    console.warn('[dialect] 读取方言配置失败', e)
+  }
+}
+
+function chooseDialect(name) {
+  if (name === session.dialect) return
+  const opt = dialectOptions.value.find((o) => o.name === name)
+  if (!opt) {
+    session.setDialect(name)
+    return
+  }
+  if (!opt.supported) {
+    // 诚实说：还没学会就是没学会，不假装听懂；继续用普通话
+    const reply = `我还没学会听${name}，等我学好了。咱先用普通话聊，好不好？`
+    messages.value.push({ role: 'assistant', content: reply })
+    session.chatHistory = messages.value
+    speakLocal(reply)
+    return
+  }
+  session.setDialect(name)
+  speakLocal(`${name}，我听着呢。您说吧。`)
+}
+
+// 找物结果卡：只在命中找物时出现，且等语音先开口后再展示
+const findResult = ref(null)
+const findVisible = ref(false)
+let findRevealTimer = null
+
+function clearFindCard() {
+  if (findRevealTimer) {
+    clearTimeout(findRevealTimer)
+    findRevealTimer = null
+  }
+  findResult.value = null
+  findVisible.value = false
+}
+
+function revealFindCard(d) {
+  if (!d || !d.ok || !d.matched) return
+  // F-5：找物成功是正反馈事件，前奏音 1:1 —— 只在命中时响一次
+  warm.announcePositive('find_object_ok')
+  findResult.value = d
+  // 语音在前、屏幕在后：给播报留出起播时间
+  findRevealTimer = setTimeout(() => {
+    findVisible.value = true
+    findRevealTimer = null
+  }, 600)
+}
 
 function setPersonality(p) {
   if (p !== session.personality) session.setPersonality(p)
@@ -130,11 +285,110 @@ function playAudio(url, text) {
   })
 }
 
+// 本地话术（不经过 /chat）：只用于立即回应急停指令
+async function speakLocal(text) {
+  caption.value = text
+  if (session.isMuted) return
+  try {
+    const res = await api.tts({ text })
+    playAudio(res.data && res.data.audio_url, text)
+  } catch (e) {
+    playAudio(null, text)
+  }
+}
+
+// 反向索求：小忆先问一句。这是请求、不是“好事”，所以不放前奏音
+function askWeather() {
+  speakLocal('您能告诉我今天天气怎么样吗？怎么说都行，我听着。')
+}
+
+// ---------- F-7 子女远程安心：首次告知 + 购药回执通知 ----------
+
+async function initChildLink() {
+  // 首次激活：大字 + 语音告知（后端默认开；老人点「我知道了」或「不让看」都记一次）
+  try {
+    const res = await api.childConsent()
+    const c = res.data || {}
+    if (c.enabled && !c.notified) {
+      careNotice.value = true
+      speakLocal(c.notice_text || '您的孩子能看到您的吃药和心情概况，看不到聊天内容。')
+    }
+  } catch (e) {
+    // 后端没起来不挡聊天；下次进入再告知
+    console.warn('[child] 读取安心开关失败', e)
+  }
+  await pollChildNotices()
+}
+
+function acceptCareNotice() {
+  careNotice.value = false
+  api.childNotified().catch(() => {})
+  speakLocal('好，就这样。您要是想关，到“隐私设置”里点一下就行。')
+}
+
+async function declineCareNotice() {
+  careNotice.value = false
+  try {
+    await api.setChildConsent({ enabled: false })
+    await api.childNotified()
+  } catch (e) {
+    console.warn('[child] 关闭安心开关失败', e)
+  }
+  speakLocal('好，我已经关上了，孩子看不到这些了。')
+}
+
+// 购药回执通知：子女处理完后，老人端播报一次「孩子给您买了药」并标已读
+async function pollChildNotices() {
+  try {
+    const res = await api.childNotices()
+    const list = ((res.data && res.data.notices) || []).filter((n) => !n.acked)
+    for (const n of list.slice(0, 2)) {
+      messages.value.push({ role: 'assistant', content: n.text })
+      session.chatHistory = messages.value
+      playChime()
+      speakLocal(n.text)
+      await api.childNoticeAck(n.id).catch(() => {})
+    }
+  } catch (e) {
+    /* 静默失败，不挡对话 */
+  }
+}
+
+// 天气类说法都算老人帮了忙；一天只记一次，前奏音也只响这一次
+const WEATHER_RE = /(天气|下雨|下雪|刮风|晴天|阴天|多云|温度|冷不冷|热不热|降温|升温)/
+
+async function noteWeatherIfAny(text) {
+  if (warm.weatherAnsweredToday()) return
+  if (!WEATHER_RE.test(text)) return
+  warm.markWeatherAnswered(text)
+  weatherAnswer.value = text
+  weatherAnswered.value = true
+  // 前奏音先响、再播报回复：await 保证两路声音不叠在一起
+  await warm.announcePositive('weather_answered')
+}
+
 async function sendMessage(text) {
   const t = (text || '').trim()
   if (!t || loading.value) return
+
+  // F-5 语音层防沉迷：整句“再放一个”由本地契约接管，不交给对话模型
+  //（有额度就放；到上限只回 T-6 固定话术；两种路径都不含禁用句式）
+  const replay = warm.handleVoiceRequest(t)
+  if (replay) {
+    messages.value.push({ role: 'user', content: t })
+    messages.value.push({ role: 'assistant', content: replay.phrase })
+    session.chatHistory = messages.value
+    speakLocal(replay.phrase)
+    return
+  }
+
   loading.value = true
   error.value = ''
+  clearFindCard()
+  clearPhotoWarn()
+  await noteWeatherIfAny(t)
+  // 与聊天并行问一次找物接口：只读、确定性，不写记忆；不在找物句式时 matched=false
+  const findPromise = api.findObject({ text: t }).catch(() => null)
   try {
     const res = await api.chat({
       user_input: t,
@@ -146,6 +400,8 @@ async function sendMessage(text) {
       conv_id: session.convId,
     })
     handleChatResponse(res.data)
+    const fr = await findPromise
+    revealFindCard(fr && fr.data)
   } catch (e) {
     error.value = '发送失败，请稍后再试。'
     console.error(e)
@@ -187,24 +443,80 @@ function compressImage(base64, maxSide = 1280, quality = 0.75) {
   })
 }
 
-// 拍照/上传图片：发给后端 → 存记忆箱 + 视觉识别 + 注入对话
+// 拍照/上传图片：压缩 → F-6 拍中反馈 → 发给后端（存记忆箱 + 视觉识别 + 注入对话）
 async function onPhoto({ base64, mime }) {
   if (loading.value) return
   loading.value = true
   error.value = ''
+  clearFindCard()
+  clearPhotoWarn()
   try {
     base64 = await compressImage(base64)
-    const res = await api.photo({
-      photo_base64: base64,
-      mime: mime || 'image/jpeg',
-      chat_history: messages.value,
-      surname: session.surname,
-      gender: session.gender,
-      is_muted: session.isMuted,
-      personality: session.personality,
-      conv_id: session.convId,
-    })
-    handleChatResponse(res.data)
+    // F-6：检测用的是压缩后的同一份 base64，复用现有压缩管线，不另传一张原图
+    if (photoGuide.enabled()) {
+      const q = await checkPhotoQuality(base64, mime || 'image/jpeg')
+      if (q && q.verdict !== 'ok') {
+        photoWarn.value = {
+          verdict: q.verdict,
+          message: photoGuide.feedback(q.verdict),
+          photo: { base64, mime: mime || 'image/jpeg' },
+        }
+        return
+      }
+    }
+    await sendPhoto(base64, mime)
+  } catch (e) {
+    console.error(e)
+    error.value = '照片发送失败，请稍后再试。'
+  } finally {
+    loading.value = false
+  }
+}
+
+// 只问"能不能拿去看"（太暗/太糊），异常时按原图发，绝不因为检测失败卡住老人
+async function checkPhotoQuality(base64, mime) {
+  try {
+    const res = await api.photoQuality({ photo_base64: base64, mime })
+    return res.data || null
+  } catch (e) {
+    console.warn('拍照质量检测失败，按原图发送', e)
+    return null
+  }
+}
+
+async function sendPhoto(base64, mime) {
+  const res = await api.photo({
+    photo_base64: base64,
+    mime: mime || 'image/jpeg',
+    chat_history: messages.value,
+    surname: session.surname,
+    gender: session.gender,
+    is_muted: session.isMuted,
+    personality: session.personality,
+    conv_id: session.convId,
+  })
+  handleChatResponse(res.data)
+}
+
+function clearPhotoWarn() {
+  photoWarn.value = null
+}
+
+// "重新拍一张"：丢弃这张，直接调起相机（InputCard 暴露 openCamera）
+function retakePhoto() {
+  clearPhotoWarn()
+  inputRef.value?.openCamera()
+}
+
+// "还是要发"：老人有权不重拍，照发；失败只提示，不反复拦
+async function sendPendingPhoto() {
+  const p = photoWarn.value && photoWarn.value.photo
+  if (!p || loading.value) return
+  clearPhotoWarn()
+  loading.value = true
+  error.value = ''
+  try {
+    await sendPhoto(p.base64, p.mime)
   } catch (e) {
     console.error(e)
     error.value = '照片发送失败，请稍后再试。'
@@ -214,15 +526,49 @@ async function onPhoto({ base64, mime }) {
 }
 
 // 录音结束：ASR 识别 → 文本 → 复用文字发送链路
+// F-2：整句"别看了"截在前端，直接停视觉，不交给聊天模型
+// 带区域的"卧室别看了"不匹配，仍走 B-4 的免看清单
+const STOP_VISION_RE =
+  /^(小忆)?[，,。！!\s]*(别看了|不要看了|别再看了|你别看了|关掉摄像头|把摄像头关了|摄像头关了吧)[，,。！!\s]*$/
+
+async function handleVoiceStop() {
+  clearFindCard()
+  const r = (await visionRef.value?.stopByVoice()) || { verified: 'fault' }
+  let reply = '好，我不看了。您想让我看，跟我说一声。'
+  if (r.alreadyOff) {
+    reply = '我现在本来就没在看，您放心。'
+  } else if (r.verified === 'fault' || r.verified === 'unknown') {
+    reply = '我没法确定摄像头停了，请重启一下电脑。'
+  } else if (r.verified === 'recording') {
+    reply = '我还在看，没能停下来。'
+  }
+  messages.value.push({ role: 'assistant', content: reply })
+  session.chatHistory = messages.value
+  speakLocal(reply)
+}
+
 async function onRecorderAudio(audioBase64) {
   try {
-    const res = await api.asr({ audio_base64: audioBase64 })
-    const text = (res.data.text || '').trim()
-    if (text) {
-      await sendMessage(text)
-    } else {
-      error.value = '没听清，请再说一遍。'
+    const res = await api.asr({ audio_base64: audioBase64, dialect: session.dialect })
+    const d = res.data || {}
+    // F-8：后端闸门没放行的方言，不把残文当老人原话，直说「还没学会」
+    if (d.refused) {
+      const reply = d.reply || '我还没学会听这个方言，等我学好了。'
+      messages.value.push({ role: 'assistant', content: reply })
+      session.chatHistory = messages.value
+      speakLocal(reply)
+      return
     }
+    const text = (d.text || '').trim()
+    if (!text) {
+      error.value = '没听清，请再说一遍。'
+      return
+    }
+    if (STOP_VISION_RE.test(text)) {
+      await handleVoiceStop()
+      return
+    }
+    await sendMessage(text)
   } catch (e) {
     console.error(e)
     error.value = '语音识别失败，请稍后再试。'
@@ -317,7 +663,13 @@ async function pollProactive() {
 
 onMounted(() => {
   connectWs()
+  initChildLink()
+  loadDialectConfig()
   proactiveTimer = setInterval(pollProactive, 30000)
+  // 从"拍照小助手"点"知道了，去拍照"过来：直接把相机打开
+  if (route.query.camera === '1') {
+    nextTick(() => inputRef.value?.openCamera())
+  }
 })
 
 onBeforeUnmount(() => {
@@ -328,6 +680,7 @@ onBeforeUnmount(() => {
   }
   if (wsRetryTimer) clearTimeout(wsRetryTimer)
   if (proactiveTimer) clearInterval(proactiveTimer)
+  clearFindCard()
   stopAudio()
 })
 
@@ -336,6 +689,7 @@ async function recallLast() {
   if (!session.convId || loading.value) return
   loading.value = true
   error.value = ''
+  clearFindCard()
   try {
     const res = await api.recall({ conv_id: session.convId })
     const d = res.data
@@ -407,6 +761,81 @@ async function recallLast() {
   color: var(--color-accent2);
   border-color: var(--color-accent2);
   background: #EEF4F0;
+}
+.dialect-not-yet {
+  color: var(--color-text-sub);
+  border-style: dashed;
+}
+.not-yet-tag {
+  margin-left: 6px;
+  font-size: var(--font-small);
+  color: var(--color-text-sub);
+}
+.photo-warn {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 20px 10px;
+  padding: 14px 16px;
+  border-left: 6px solid var(--color-accent);
+}
+.care-notice {
+  margin: 14px 20px 0;
+  padding: 18px 20px;
+  background: var(--color-surface-soft);
+  border: 2px solid var(--color-accent);
+  border-radius: var(--radius-lg);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.care-notice-title {
+  margin: 0;
+  font-size: var(--font-subtitle);
+  font-weight: 700;
+  color: var(--color-accent-deep);
+}
+.care-notice-text {
+  margin: 0;
+  font-size: 24px;
+  line-height: 1.6;
+  color: var(--color-text);
+}
+.care-notice-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.photo-warn-icon {
+  flex-shrink: 0;
+  font-size: 30px;
+  line-height: 1;
+}
+.photo-warn-text {
+  flex: 1;
+  margin: 0;
+  font-size: var(--font-body);
+  line-height: 1.55;
+  color: var(--color-text);
+}
+.photo-warn-actions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+@media (max-width: 768px) {
+  .photo-warn {
+    flex-wrap: wrap;
+    margin: 0 12px 8px;
+  }
+  .photo-warn-actions {
+    width: 100%;
+    flex-direction: row;
+  }
+  .photo-warn-actions .btn {
+    flex: 1;
+  }
 }
 .caption {
   display: flex;

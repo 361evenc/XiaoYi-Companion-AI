@@ -39,6 +39,15 @@
       <p v-if="error" class="error-tip">{{ error }}</p>
       <p v-else-if="loading" class="error-tip">正在打开记忆箱…</p>
 
+      <!-- F-4：从一维的重要事件，进到四维时间线（人 / 物件 / 时间 / 地方） -->
+      <section class="card entry-line">
+        <h2 class="section-title">翻旧事</h2>
+        <p class="entry-sub">按人、按物件、按时间、按地方，都能翻到当年的事。</p>
+        <button class="btn btn-primary entry-btn" type="button" @click="$router.push('/timeline')">
+          🗂️ 打开家庭时间线
+        </button>
+      </section>
+
       <!-- 重要事件时间线 -->
       <section class="card">
         <h2 class="section-title">我记得的重要事</h2>
@@ -163,6 +172,22 @@ load()
   margin: 0 0 14px;
   font-size: var(--font-subtitle);
   color: var(--color-text);
+}
+.entry-line {
+  border-left: 6px solid var(--color-accent2);
+}
+.entry-line .section-title {
+  margin-bottom: 8px;
+}
+.entry-sub {
+  margin: 0 0 14px;
+  font-size: var(--font-body);
+  line-height: 1.7;
+  color: var(--color-text-sub);
+}
+.entry-btn {
+  min-height: 56px;
+  font-size: var(--font-bubble);
 }
 .flow {
   list-style: none;

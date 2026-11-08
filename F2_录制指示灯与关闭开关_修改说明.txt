@@ -1,0 +1,72 @@
+F-2 持续录制指示灯 + 关闭开关 修改说明
+========================================
+
+时间：2026-11-08
+范围：只做前端 UI + 接 H-2 真实接口（按确认的方案，不改 B-3/H-7/活动模块）
+
+一、改动文件
+
+1. frontend/src/api/index.js
+   - 新增 H-2 接口封装：visionStatus / visionStart / visionStop / visionVerify
+   - start/stop 超时 30s（H-2 启动最长等 20s）；verify 超时 15s
+
+2. frontend/src/components/VisionStatus.vue（新增）
+   - 状态卡放在聊天页顶部，始终可见，文字为主、颜色为辅
+   - 第一行 34px：小忆在看 / 没在看 / 我正在确认 / 我没法确定
+   - 第二行 24px：声音：在听 / 没在听（这台电脑还没接麦克风）
+   - 第三行 20px：状态说明
+   - 一键按钮：录中显示“🛑 别看了”，停止后显示“让小忆看”，
+     故障显示“再试一次”
+   - 彩色左边框只作辅助：在录=蓝、已停=黄、故障=红、切换=灰
+   - 关闭后的 4 项影响清单（找物/跌倒告警/活动水平/识图）
+   - 首次激活告知弹窗：大字 + 语音；确认后才真正 start
+     · 首次选择写入 localStorage：
+       xiaoyi.vision.notice.v1、xiaoyi.vision.choice.v1
+     · 选“知道了”后下次进入且状态为 idle 时自动 start
+     · 选“先别看了”后不再自动开
+   - 状态每 10s 轮询一次；start/stop 以接口返回状态为准
+
+3. frontend/src/views/Chat.vue
+   - 挂载 VisionStatus
+   - 语音“别看了 / 不要看了 / 关掉摄像头”等整句指令在前端截住，
+     直接调 H-2 stop，不交给聊天模型
+   - 带区域的“卧室别看了”不匹配，仍走 B-4 免看清单
+   - 停止后的屏幕/语音话术按验证结果区分：
+     · released → “好，我不看了。您想让我看，跟我说一声。”
+     · fault    → “我没法确定摄像头停了，请重启一下电脑。”
+     · recording→ “我还在看，没能停下来。”
+
+二、信任保护（重点）
+
+H-2 的 stop 接口返回 verified=released/fault/recording，前端只按 verified 显示，
+不按 ok 字段或 HTTP 200 猜“已停”。
+
+另外发现 H-2 当前有一个状态口径问题（本环境无 opencv/yolov8n.pt 时复现）：
+启动失败时 recorder 线程以 SystemExit 退出，_run 的 finally 把状态设成
+released（detail“已停止并释放设备”），而不是 fault，confirmed_off 也会变 true。
+这会被误读成“已停”。F-2 已在前端兜底：
+  - start 返回 ok=false + released 时，显示“启动没成功，我没法确定”，
+    绝不显示“我现在不看啦”；
+  - 轮询到 released 但本次没有 stop 验证时，补一次 /api/vision/verify，
+    验证失败就显示“我没法确定”。
+建议 H-2 负责人修正 _run 的 finally：启动失败/异常退出应置 fault，不能置 released。
+
+三、验证结果
+
+- npm run build 通过
+- 浏览器实测：
+  · 首次进入出现大字告知弹窗，两个按钮可点
+  · 点“先别看了”后状态卡显示“没在看”、声音“没在听（未开通）”、4 项清单
+  · 点“让小忆看”（本机无摄像头/无模型）后显示“我没法确定”，
+    未出现“我现在不看啦”误报
+- 未验证：
+  · 真实摄像头 recording → stop → released 的完整链路（本机无 cv2/模型）
+  · 跌倒/活动/找物的实际降级（按决定只做前端提示，不改其它模块）
+  · 子女端“录制已停”同步（B-9 不在本仓库）
+
+四、演示重置
+
+想重新演示首次告知，可在浏览器控制台删除：
+  localStorage.removeItem('xiaoyi.vision.notice.v1')
+  localStorage.removeItem('xiaoyi.vision.choice.v1')
+然后刷新页面。

@@ -1,0 +1,115 @@
+F-6 识图拍摄引导 —— 修改说明
+============================================================
+日期：2026-11-08
+任务卡：F-6（前端 / P1 / 前置 H-4 识图场景扩展）
+
+一、修改原因
+------------------------------------------------------------
+H-4 识图（老照片认人、说明书读字）的成功率，很大一部分取决于"怎么拍"：
+老人拍老照片容易拍歪、光线不够、离得太远；拍说明书容易反光、字太小。
+不教怎么拍，H-4 的 80% 验收数据就达不到，而且不能把责任全算在模型头上。
+
+这次按任务卡的 MVP 边界做两件事：
+  1) 拍前教：老照片 / 说明书两套引导页（放平、光线足、距离适中，大字+示意图例）；
+  2) 拍中纠：拍完只判"太暗 / 太糊"两类，给一句温和提示；
+同时复用现有照片压缩管线（Chat.vue 的 compressImage），不另起炉灶。
+
+二、修改内容（按文件）
+------------------------------------------------------------
+1. vision/photo_quality.py（新增）
+   - 用 PIL + numpy 做两类检测：
+       · 太暗：灰度均值 < 65（长边统一缩到 640 后计算）
+       · 太糊：Laplacian 方差 < 100（四邻域 Laplacian，numpy 切片实现）
+       · 又暗又糊：主判定取 dark，issues 同时记两类
+   - 返回 verdict / issues / brightness / sharpness / thresholds，阈值集中可校准；
+     支持纯 base64 与 dataURL 两种入参；坏数据抛 ValueError。
+   - 为什么不是 cv2：实测主环境（requirements.txt 所在环境）没有 cv2，
+     vision/requirements.txt 里的 opencv 属于另一条视觉线的独立 venv。
+     为两类检测引入 90MB 新依赖不划算，numpy 实现的 Laplacian 与 cv2 同核，
+     结果可回归。已在 requirements.txt 保持不动（未新增 opencv）。
+
+2. backend/api/photo_scene_api.py
+   - 新增 POST /api/photo/quality（复用 /api/photo 前缀，无需在 main.py 再挂路由）。
+   - 只回机器判定，不识别内容、不产出任何对象级文案（"歪/摆正"不在 MVP）。
+   - 入参空 → 400；base64 >30MB → 413；解码失败 → 400。
+   - 接口异常时前端按原图发送，检测不挡拍照主链路。
+
+3. frontend/src/data/photoGuide.js（新增）
+   - 两个场景（old_photo / medicine）各 3 条要点 + 相机内 3 条短提示；
+   - 拍后反馈固定两类（dark / blurry），语气"我看不清 + 再拍一张好不好"，
+     无管教腔/哄骗腔；不存在"歪、摆正、倾斜"等对象级反馈文案；
+   - 本地状态：场景、引导开关（localStorage: xy_photo_guide_v1）；
+   - A/B 对照：引导页可关掉引导，另支持 URL ?guide=off（不写本地状态）。
+   - 可注入 storage/location 的工厂，供 Node 测试使用，不碰真实 localStorage。
+
+4. frontend/src/views/PhotoGuide.vue（新增）
+   - "拍照小助手"页：两个大场景切换 + 每条要点大字 + 放平/光线/距离三张内联
+     SVG 示意图例；底部"知道了，去拍照"直接带场景跳到聊天页并打开相机；
+   - 页面最底下放"测试开关"（A/B 关掉/打开引导），字号小一级，不进老人日常动线。
+
+5. frontend/src/components/InputCard.vue
+   - 相机覆盖层顶部增加"当前场景三条要点"（引导关掉时整块不渲染）；
+   - 相机优先请求后置摄像头（environment），失败回落到前置，方便手机拍物件；
+   - defineExpose({ openCamera })：给 Chat 的"重新拍一张"直接调起相机。
+
+6. frontend/src/views/Chat.vue
+   - onPhoto 改为"压缩 → 检测 → 发送"：检测复用 compressImage 产出的同一份 base64，
+     不重传原图、不新增压缩逻辑；只有 photoGuide.enabled() 时才调检测（A/B 无引导臂干净）。
+   - 非 ok 时展示拍后气泡（大字 + "重新拍一张" / "还是要发"），不强制重拍；
+     检测接口异常 → 直接按原图发送（宁可少提示，不让老人发不出去）。
+   - 进入 /chat?camera=1 时自动打开相机；发送文字时顺手收起残留的拍照提示。
+
+7. 入口与接口
+   - frontend/src/router/index.js：新增 /photo-guide。
+   - frontend/src/components/SidebarCards.vue：侧栏新增"📷 拍照小助手"入口。
+   - frontend/src/api/index.js：新增 photoQuality → POST /photo/quality（超时 10s）。
+
+8. 测试
+   - vision/tests/f6_quality_check.py（新增）：5 组、13 项，真实跑检测函数与路由注册；
+   - frontend/tests/f6_guardrails.mjs（新增）：5 组、51 项，覆盖文案边界、
+     引导开关、拍照链路顺序与"不新增 cv2/opencv"。
+
+三、技术边界（这次明确不做）
+------------------------------------------------------------
+- 不做对象级反馈：不判"歪了/摆正/倾斜/太远"，只做整图亮度与清晰度两类；
+- 不做识别：F-6 不调用 H-4 识别，不参与识别成功率计算，验收数据由 B-10 收口；
+- 不做端侧模型：只有亮度均值 + Laplacian 方差，无额外模型/权重；
+- 不做自动重拍/强制拦截：老人有"还是要发"的选择权；
+- 不覆盖所有拍摄问题：反光、遮挡、方向等不在 MVP，引导页只做拍前教育。
+
+四、验证记录（本次已跑）
+------------------------------------------------------------
+1) python vision\tests\f6_quality_check.py
+   → PASS（清晰 ok / 压暗 dark / 高斯模糊 blurry / 纯色 blurry / 又暗又糊 dark；
+     base64 与 dataURL 一致；坏数据 400；真实帧 15 张全部 ok，无阈值误伤）
+
+2) node tests\f6_guardrails.mjs（在 frontend 目录）
+   → PASS（5 组 51 项）
+
+3) npm run build
+   → 通过（129 modules，dist 正常产出）
+
+4) 接口实测（经 Vite 代理 5173 → 后端 8010）
+   → sharp: ok / brightness 199.5；dark: dark / 36.2；blur: blurry / sharpness 2.3
+
+5) 浏览器实测
+   → /photo-guide：标题、两个场景、三条要点（含"躲开反光"）、A/B 开关均可用；
+   → /chat 上传过暗图：出现"这张有点暗，我有点看不清……再拍一张好不好？"气泡，
+     并有"重新拍一张""还是要发"两个按钮。
+
+五、需要人工 / B-10 收口的验收项（不是代码能自证的）
+------------------------------------------------------------
+1) 拍摄成功率较无引导提升 ≥30%：
+   A/B 对照，同一老人拍同一组照片，有/无引导各 20 张、≥3 人；
+   判定用 H-4 的识别成功率，由 B-10 报告统一收口。
+   "无引导"臂操作：在拍照小助手页关掉"测试开关"，或用 /chat?guide=off。
+2) 引导页老人能独立使用：在 H-6 实测时复核（本次只做了界面可用性验证）。
+3) 阈值 65 / 100 是基于合成图 + 现有 15 张真实帧校准的初值；
+   真人实拍（尤其老旧照片偏黄、说明书反光）建议在 A/B 时记录误判，再微调。
+
+六、回滚方式
+------------------------------------------------------------
+- 前端：/photo-guide 路由与侧栏入口可移除；Chat.vue 删除 photoGuide 相关分支即恢复
+  原"压缩后直接发送"；InputCard 相机提示块由 cameraTips 为空自动不渲染。
+- 后端：photo_scene_api.py 删除 /quality 路由即可；vision/photo_quality.py 可整体删除。
+- 无数据库/记忆结构变更，无数据迁移，回滚不影响已有照片与记忆。

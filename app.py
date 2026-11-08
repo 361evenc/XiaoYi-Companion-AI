@@ -772,7 +772,8 @@ def apply_asr_corrections(text):
             t = t.replace(wrong, right)
     return t
 
-def transcribe_audio(audio_input):
+def transcribe_audio(audio_input, dialect_hint=None):
+    """识别语音。dialect_hint 由后端选型（O-9）给出的方言引擎参数，缺省走普通话。"""
     if audio_input is None:
         return ""
     try:
@@ -787,6 +788,7 @@ def transcribe_audio(audio_input):
             return ""
         audio_base64 = base64.b64encode(wav_bytes).decode("utf-8")
         headers = {"Authorization": f"Bearer; {VOLC_ACCESS_TOKEN}", "Content-Type": "application/json"}
+        hint = dialect_hint if isinstance(dialect_hint, dict) else {}
 
         def _asr_call(use_hotwords):
             body = {
@@ -795,6 +797,11 @@ def transcribe_audio(audio_input):
                 "audio": {"format": "wav", "rate": 16000, "bits": 16, "channel": 1, "language": "zh-CN", "data": audio_base64, "enable_itn": True, "enable_punc": True},
                 "request": {"reqid": str(uuid.uuid4()), "sequence": 1}
             }
+            # F-8：方言引擎参数只来自后端选型（eval 里的 asr 字段），不在这里猜
+            if hint.get("cluster"):
+                body["app"]["cluster"] = str(hint["cluster"])
+            if hint.get("language"):
+                body["audio"]["language"] = str(hint["language"])
             if use_hotwords:   # 热词：药名/家人名等易错词加权
                 body["request"]["boosting_table"] = ASR_HOTWORDS
             resp = http_session.post(ASR_URL, headers=headers, json=body, timeout=30)
@@ -1492,6 +1499,17 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         if is_first_msg:
             Thread(target=generate_title_async, args=(conv_id, save_history), daemon=True).start()
         # 语音播报放到 .then 后置事件（play_reply_audio），不阻塞文字显示
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
+    # F-4/H-3 人物建档（确定性流程，不调模型）：老人主动说"这是我孙子豆豆"→
+    # 小忆复述确认→老人说"对"→写入人物档案（姓名+称谓）。AI 不猜、子女端无建档入口。
+    # 放在记忆确认之前：建档的"对/不对"不能被事实确认流程接走。
+    prof_reply = memory_bank.handle_person_profile_chat(
+        user_input, user_memory["call_name"])
+    if prof_reply is not None:
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": prof_reply}]
+        save_conversation(conv_id, save_history)
         return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
     # 记忆主动确认的答复（上一轮末尾小忆问过"您之前说X是Y，是吧？"）：

@@ -18,6 +18,39 @@
       </span>
     </button>
 
+    <button class="nav-card" type="button" @click="$router.push('/timeline')">
+      <span class="nav-icon">🗂️</span>
+      <span class="nav-text">
+        <span class="nav-name">家庭时间线</span>
+        <span class="nav-sub">按人、按地方翻旧事</span>
+      </span>
+    </button>
+
+    <button class="nav-card" type="button" @click="$router.push('/blindbox')">
+      <span class="nav-icon">🎁</span>
+      <span class="nav-text">
+        <span class="nav-name">今天的盲盒</span>
+        <span class="nav-sub">一天一个小惊喜</span>
+      </span>
+    </button>
+
+    <button class="nav-card" type="button" @click="$router.push('/bottle')">
+      <span class="nav-icon">🫙</span>
+      <span class="nav-text">
+        <span class="nav-name">收集瓶</span>
+        <span class="nav-sub">攒下的美好瞬间</span>
+      </span>
+    </button>
+
+    <!-- F-6 拍照小助手：拍前教（放平/光线/距离），拍中有太暗/太糊反馈 -->
+    <button class="nav-card" type="button" @click="$router.push('/photo-guide')">
+      <span class="nav-icon">📷</span>
+      <span class="nav-text">
+        <span class="nav-name">拍照小助手</span>
+        <span class="nav-sub">教您怎么拍清楚</span>
+      </span>
+    </button>
+
     <button class="nav-card" type="button" @click="$router.push('/history')">
       <span class="nav-icon">💬</span>
       <span class="nav-text">

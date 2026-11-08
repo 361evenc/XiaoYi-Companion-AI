@@ -10,6 +10,7 @@
     POST /api/photo/elder/confirm              {path, accepted, name?, relation?}  确认/否认
     POST /api/photo/medicine                   {path}                 说明书 → 结构化 + 大字稿
     GET  /api/photo/medicine/check?text=...    越界话术自查（第二人 review 用）
+    POST /api/photo/quality                    {photo_base64}         F-6 拍中反馈：只判太暗/太糊
 
 ★ 为什么只收 path 不收 base64：这两个场景处理的是**已经存在本地**的图（记忆箱里的
   老照片、刚拍完的说明书），不额外在接口层复制一份图数据。原始图不出本地进程，
@@ -31,6 +32,7 @@ if str(_VISION_DIR) not in sys.path:
 from photo_scene import (  # noqa: E402
     REQUIRED_FIELDS, RX_MARKERS, scene_engine, vision_ready,
 )
+from photo_quality import analyze_base64  # noqa: E402
 
 router = APIRouter(prefix="/api/photo", tags=["photo-scene"])
 
@@ -52,6 +54,13 @@ class ConfirmReq(BaseModel):
 
 class MedReq(BaseModel):
     path: str
+
+
+class QualityReq(BaseModel):
+    # 前端传压缩后的纯 base64（复用 Chat.vue 的 compressImage 管线），
+    # 也兼容 dataURL 前缀；这里不做识别，只回"能不能拿去看"
+    photo_base64: str = ""
+    mime: str = "image/jpeg"
 
 
 def _check_path(p: str):
@@ -113,3 +122,23 @@ def medicine(req: MedReq):
 def medicine_check(text: str):
     hits = scene_engine.med.find_forbidden(text)
     return {"text": text, "forbidden": hits, "safe": not hits}
+
+
+@router.post("/quality")
+def quality(req: QualityReq):
+    """F-6 拍中反馈：只判"太暗 / 太糊"，不识别内容、不做对象级判断。
+
+    ★ 只回机器判定和指标，**不在这里拼"有点歪，摆正一点"这类话**：
+      对象级反馈不在 MVP；UI 文案统一放在前端 photoGuide.js，改话术不用动后端。
+    """
+    if not req.photo_base64:
+        raise HTTPException(400, "缺少 photo_base64")
+    # 压缩后的图通常 <1MB；base64 超过 30MB 基本是原图误传，直接拒，别占解析内存
+    if len(req.photo_base64) > 30 * 1024 * 1024:
+        raise HTTPException(413, "图片太大（base64 > 30MB）")
+    try:
+        return analyze_base64(req.photo_base64)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"图片无法解码：{e}")

@@ -1,0 +1,9 @@
+{
+  "generated_at": "2026-11-08 23:49",
+  "baseline_note": "基线 = 当前 VOLC 普通话模型在同一批老人方言语料上实测的 WER；WER 按字级编辑距离计算，本卡第 1 周定死后写进《方言分布统计》。",
+  "wer_gate": "WER ≤ 基线 × 0.8",
+  "dialects": [],
+  "missing": [
+    "dialect_eval/ 未入库（没有方言语料/转写，基线测不了）"
+  ]
+}

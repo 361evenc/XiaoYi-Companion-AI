@@ -1,0 +1,60 @@
+F-1 找物结果展示（屏幕端）修改说明
+====================================
+
+时间：2026-11-08
+任务：F-1（前端并行调 B-3 接口，裁剪图先做契约与演示开关，找不到只改屏幕文案）
+
+一、改动文件与内容
+
+1. frontend/src/api/index.js
+   - 新增 findObject(payload) → POST /api/find_object
+   - 单独设 5s 超时：本地确定性查询，避免接口异常时拖住下一轮输入
+
+2. frontend/src/components/FindObjectCard.vue（新增）
+   - 三种状态：
+     · graph（我瞅见过）：位置 + 时间 + 有裁剪图才显示
+     · text（您上次说的）：位置 + 时间，不配图（没有画面依据）
+     · none（这次没找着）：显示不确定话术，不出现空白卡
+   - 找不到屏幕文案：先陪老人回忆“您最后放哪儿了？咱一起想想”，
+     再给一句“说一声放哪了，我记上”；语音话术未改
+   - 时间人性化：今天/昨天 + 早上/中午/下午/傍晚/晚上，30 天内“N天前”，
+     超过 30 天显示“11月3日”
+   - 适老：位置 34px 加粗，引导语 24px，辅助提示 20px，高对比底色
+   - 隐私契约：只有 has_clean_crop === true 且 crop_url 非空才渲染真实裁剪图；
+     仅 graph 层可能出现图；too_old 时不显示位置和图
+   - 演示开关 VITE_FIND_DEMO=1：仅对 graph 结果使用本地演示图，
+     图片右下角强制标“演示图”，不冒充真实隐私检测结果
+   - 动画 0.28s 滑入，尊重 prefers-reduced-motion
+
+3. frontend/src/views/Chat.vue
+   - sendMessage 中与 /api/chat 并行发起 /api/find_object
+   - 只认 ok && matched 的结果；matched=false（普通聊天）不弹卡
+   - 语音在前、屏幕在后：收到结果后延时 600ms 显示
+   - 新一轮文字/拍照/撤回时清卡；离开页面时清定时器
+   - 卡片放在大字幕与输入区之间，不进入 chat_history，刷新不残留
+
+4. frontend/public/demo/find_crop_demo.jpg（新增）
+   - 来源：vision/frames/09_meal.jpg（食物近景，画面内无人物）
+   - 仅作演示素材，不进记忆库、不参与隐私判定
+
+5. README.md（顺手修正上次遗留）
+   - 前端端口 5174 → 5173，与 vite.config.js 的 server.port 一致
+
+二、演示开关用法
+
+默认关闭。需要给评委演示裁剪图时：
+
+  PowerShell:
+    $env:VITE_FIND_DEMO='1'; python run.py
+
+图只在“我瞅见过”（graph）结果上出现，并标注“演示图”。
+真实裁剪图仍需 B-3 返回 has_clean_crop=true + crop_url，当前 B-3 恒为 False。
+
+三、验证结果
+
+- npm run build 通过（110 modules，无编译错误）
+- 后端 /api/find_object 实测“我老花镜放哪了”返回 matched=true、tier=none
+- 浏览器实测：进入聊天、发送该句后，屏幕出现“🤔 这次没找着 /
+  我没瞅见老花镜 / 您最后放哪儿了？咱一起想想”，非空白卡
+- 未验证项：graph 图文状态（本地记忆库当前没有 source=visual 的条目）、
+  真实裁剪图（B-3 尚未提供），需等视觉数据接入后补测

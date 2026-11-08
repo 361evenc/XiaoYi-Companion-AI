@@ -56,6 +56,15 @@
     <!-- 摄像头拍照覆盖层 -->
     <div v-if="cameraOpen" class="camera-mask">
       <div class="camera-panel card">
+        <!-- F-6 拍中提示：当前场景三条要点；引导被关（A/B 对照）时整块不出现 -->
+        <div v-if="cameraTips.length" class="camera-guide">
+          <p class="camera-guide-title">{{ cameraScene.name }}，记这三条</p>
+          <ol class="camera-guide-list">
+            <li v-for="(t, i) in cameraTips" :key="t">
+              <span class="camera-guide-no">{{ i + 1 }}</span>{{ t }}
+            </li>
+          </ol>
+        </div>
         <video ref="videoEl" class="camera-video" autoplay playsinline></video>
         <div class="camera-actions">
           <button type="button" class="btn btn-primary" @click="snapPhoto">📸 拍照</button>
@@ -69,6 +78,7 @@
 <script setup>
 import { nextTick, ref } from 'vue'
 import { createRecorder } from '../utils/audio'
+import { photoGuide } from '../data/photoGuide'
 
 defineProps({
   muted: { type: Boolean, default: false },
@@ -92,6 +102,10 @@ const quickPhrases = [
   '身体有点不舒服',
   '讲讲以前的事',
 ]
+
+// F-6：当前场景的三条拍中要点。关掉引导（A/B 对照）时为空，整块提示不渲染
+const cameraTips = photoGuide.cameraTips()
+const cameraScene = photoGuide.sceneInfo()
 
 function submit() {
   const text = draft.value.trim()
@@ -152,17 +166,27 @@ function onPickFile(e) {
 }
 
 // 打开摄像头预览
+// F-6：拍老照片/说明书要用后置摄像头（手机）；桌面只有一颗摄像头时，
+// environment 也会回落到默认设备，因此先要后置、失败再要前置
 async function openCamera() {
+  let stream = null
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
-    cameraStream.value = stream
-    cameraOpen.value = true
-    await nextTick()
-    if (videoEl.value) videoEl.value.srcObject = stream
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: 'environment' } },
+    })
   } catch (e) {
-    console.error(e)
-    emit('photo-error', '无法打开摄像头，请检查浏览器权限。')
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } })
+    } catch (e2) {
+      console.error(e2)
+      emit('photo-error', '无法打开摄像头，请检查浏览器权限。')
+      return
+    }
   }
+  cameraStream.value = stream
+  cameraOpen.value = true
+  await nextTick()
+  if (videoEl.value) videoEl.value.srcObject = stream
 }
 
 function closeCamera() {
@@ -189,6 +213,9 @@ function snapPhoto() {
   closeCamera()
   emitPhoto(parts)
 }
+
+// 给父组件用：Chat 在"重新拍一张"时直接调起相机，不用老人再找拍照按钮
+defineExpose({ openCamera })
 </script>
 
 <style scoped>
@@ -275,6 +302,45 @@ function snapPhoto() {
   gap: 14px;
   width: 100%;
   max-width: 480px;
+}
+.camera-guide {
+  padding: 10px 12px;
+  background: var(--color-surface-soft);
+  border-radius: var(--radius-md);
+}
+.camera-guide-title {
+  margin: 0 0 6px;
+  font-size: var(--font-subtitle);
+  font-weight: 700;
+  color: var(--color-accent2);
+}
+.camera-guide-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.camera-guide-list li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: var(--font-body);
+  color: var(--color-text);
+}
+.camera-guide-no {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  font-weight: 700;
+  color: #FFFFFF;
+  background: var(--color-accent2);
+  border-radius: 50%;
 }
 .camera-video {
   width: 100%;

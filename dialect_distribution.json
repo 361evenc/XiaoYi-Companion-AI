@@ -1,0 +1,40 @@
+{
+  "generated_at": "2026-11-08 23:49",
+  "channels": {
+    "conversations": {
+      "status": "ok",
+      "samples": 24,
+      "labeled": 0,
+      "feature_hits": {
+        "河南方言": 0,
+        "东北方言": 0,
+        "山东方言": 0,
+        "上海方言": 0,
+        "湖北方言": 0
+      },
+      "note": "已有对话日志，但消息没有方言标注：只统计特征词命中，不能算方言占比"
+    },
+    "h5_interview": {
+      "status": "缺失",
+      "samples": 0,
+      "labeled": 0,
+      "by_dialect": {},
+      "note": "dialect_interview/ 未入库（H-5 访谈记录还没有实物）"
+    },
+    "child_form": {
+      "status": "暂无",
+      "samples": 0,
+      "labeled": 0,
+      "by_dialect": {},
+      "note": "还没有人填「老人使用的方言」"
+    }
+  },
+  "total_labeled": 0,
+  "top3": [],
+  "complete": false,
+  "missing": [
+    "通道②H-5 访谈方言记录缺失/为空",
+    "通道③子女端表单还没有人填",
+    "三通道没有任何带方言标注的样本，Top3 无法给出"
+  ]
+}

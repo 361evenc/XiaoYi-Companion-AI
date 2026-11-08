@@ -47,11 +47,12 @@ class CorrectRequest(BaseModel):
 
 @router.get("/memory/search")
 def api_memory_search(q: str = "", by: str = "object", k: int = 10):
-    """统一记忆检索（B-5）：by ∈ person|object|scene。
+    """统一记忆检索（B-5，四维）：by ∈ person|object|scene|time。
     - person：人物档案优先；无档案的具名人物退回三类（resolved.kind=fallback_visitor，
       UI 只显"有客人来过"，不显示猜的人名）
     - object：物品（"X位置"规范键加权）
     - scene：场景（H-2 粗位置标签优先，无标签走词典+bigram）
+    - time：时间（F-4 加的一维），q 传"2024""2024年5月""去年""上个月"，按发生时间倒序
     fact 结果带 history（旧值随检索可查）。"""
     return memory_service.search(q, by, k)
 

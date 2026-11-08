@@ -1,0 +1,26 @@
+拉取远端代码 说明
+==================
+
+时间：2026-11-08
+远端：https://github.com/361evenc/XiaoYi-Companion-AI.git（origin/main）
+
+修改原因：
+本地仓库落后于远端，需要把团队最新推送的代码同步到本地，保持与远端一致。
+
+执行的命令：
+git pull origin main
+
+修改内容：
+- 版本从 e5fc343 快进（Fast-forward）到 1348593，无冲突、无需手动合并。
+- 共变更 126 个文件，新增 17441 行、删除 197 行。
+- 主要新增/改动：
+  - backend/api/：callvision、emergency、explain_api、fallsafety、memory、photo_scene_api、vision 等新接口
+  - backend/services/：emergency_service.py、wechat_caller.py，chat_service.py、memory_service.py 有更新
+  - frontend/src/views/Call.vue（新增通话页面）、Chat.vue、SidebarCards.vue、router/index.js、api/index.js
+  - memory_system.py、reminder.py、run.py、app.py、ai_services.py 有更新
+  - 新增 vision/ 目录（视觉感知相关脚本、文档、示例帧、测试）与多份需求/交付文档
+  - 新增 backup_system.py、health_kb.py、health_knowledge.json 及相关测试脚本
+- 本次为纯拉取操作，未对代码做任何本地修改；本地原有未跟踪文件保持不变。
+
+备注：
+PowerShell 会把 git 的进度信息（输出到 stderr）显示成红色错误样子，实际退出码为 0，拉取成功。

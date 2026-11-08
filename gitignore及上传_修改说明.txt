@@ -1,0 +1,31 @@
+.gitignore 修改 + 仓库上传 · 修改说明
+============================================================
+
+【修改原因】
+前后端重构完成，需把更新后的代码上传 GitHub 仓库（origin:
+https://github.com/361evenc/XiaoYi-Companion-AI.git）。
+上传前发现两处隐私数据治理问题需要一并处理。
+
+【修改内容】
+
+1. .gitignore 追加以下排除规则：
+   - conversations.json、用户画像.txt：用户聊天记录与画像（运行时隐私数据）
+   - photos/、uploads/：用户上传的照片与文件（运行时数据）
+   - node_modules/、dist/：前端 npm 依赖与构建产物（可由安装/构建重新生成）
+
+2. git rm --cached conversations.json 用户画像.txt
+   - 两者此前被仓库跟踪（历史提交中已存在），本次停止跟踪、本地文件保留。
+   - 注意：旧提交历史中仍含早期版本数据，如需彻底清除历史可另行
+     用 git filter-repo 处理（会改写历史，需谨慎）。
+
+3. 上传提交：e5fc343
+   refactor: 前后端重构收尾（Gradio → Vue3+Vite / FastAPI）
+   59 files changed, 12993 insertions(+), 3950 deletions(-)
+   新增 backend/（FastAPI 全部端点 + WS）、frontend/（Vue3 全部页面 +
+   PWA 图标）、run.py（单入口启动器）、任务清单与修改说明文档；
+   app.py 删 Gradio 界面段；启动小忆.bat 改单入口。
+   推送结果：1d40642..e5fc343  main -> main（已同步）
+
+【验证】
+git status 显示本地与 origin/main 完全同步，无未推送提交；
+暂存内容已确认未混入 node_modules/dist/photos/uploads 等目录。

@@ -637,6 +637,51 @@ OLD_VALUE_Q_RE = re.compile(
     r"(?:以前|之前|原先)(?:的名字|名字)?(?:叫|是)(?:什么|啥|啥呀|啥来着|啥了|什么呢)"
 )
 
+# ---------------------------------------------------------------- F-4：人物建档（聊天链路）
+# 口径（任务卡写死）：建档唯一路径 = 老人**主动陈述**"这是我孙子豆豆" + 小忆复述确认；
+# AI 不猜（猜错人物=叫错名的信任爆点）；子女端不建档；档案只存姓名+称谓，不存人脸特征。
+# 这里只认两类最不易误触发的句式（其余一律放行正常聊天，宁可少建不可建错）：
+#   ① "这是/那是我（家/的）REL（NAME）"     例：这是我孙子豆豆
+#   ② "我（家/的）REL（的名字），叫 NAME"  例：我孙子叫豆豆 / 这是我孙子，叫豆豆
+PROFILE_RELATIONS = (
+    "外孙女", "外孙子", "儿媳妇", "老伴儿", "孙子", "孙女", "外孙", "儿媳",
+    "女婿", "女儿", "儿子", "老伴", "爱人", "爸爸", "妈妈",
+    "哥哥", "弟弟", "姐姐", "妹妹",
+)
+_REL = "|".join(PROFILE_RELATIONS)
+# 名字后面紧跟这些词的多半是叙述（"在睡觉""刚回来"），不是名字 → 不猜
+_PROFILE_NOT_NAME = (r"(?!的|照|房|车|在|刚|正|今天|昨天|说|去|来|又|还|也|就|已经|考上"
+                     r"|买|做|吃|喝|睡|住|们|了|啦|呀|啊|吧|呢|吗)")
+_PROFILE_INTRO_RE = re.compile(
+    rf"(?:这|那)(?:是|就是)(?:我|俺)(?:家|的)?(?P<rel>{_REL})"
+    rf"(?:{_PROFILE_NOT_NAME}(?P<name>[^，。！？,.!?\s]{{1,4}}))?"
+    rf"[了吧啊呀呢]*[。！？,.!?\s]*$"
+)
+_PROFILE_CALL_RE = re.compile(
+    rf"(?:我|俺)(?:家|的)?(?P<rel>{_REL})(?:的名字)?[，,]?\s*(?:他|她)?"
+    rf"(?:叫|名字叫|名叫|名字是)(?!啥|什么|谁|哪|多少)"
+    rf"(?P<name>[^，。！？,.!?\s]{{1,6}})[了吧啊呀呢]*[。！？,.!?\s]*$"
+)
+# "以后别叫豆豆了" → 删档案，退回三类（不带名字的"别叫了"不接管，避免误删）
+_PROFILE_REMOVE_RE = re.compile(
+    rf"(?:以后|往后|从今往后)?(?:别|不要|不用)(?:再)?(?:叫|提)"
+    rf"(?!(?:了|啦|呀|啊|吧|他|她|它|您|你|我))"
+    rf"(?P<name>[^，。！？,.!?\s]{{1,6}})[了吧啊呀呢]*[。！？,.!?\s]*$"
+)
+
+
+def _profile_name_from_reply(text):
+    """老人在"叫什么名字呀"之后报的名字：去掉"叫/是/他"等前缀与语气词。"""
+    s = str(text or "").strip()
+    s = re.split(r"[，。！？,.!?]", s)[0]
+    s = re.sub(r"^(?:他|她)?(?:叫|名字叫|名叫|名字是|是)", "", s)
+    s = _norm_value(s).strip("了吧啊呀呢")
+    if not s or len(s) > 8:
+        return ""
+    if re.fullmatch(r"(?:啥|什么|谁|哪|不知道|忘了|不记得|记不清)", s):
+        return ""
+    return s
+
 
 def _strip_pronoun(thing):
     """更正/提问里的主语去掉称谓前缀："我孙子"→"孙子"、"把豆豆"→"豆豆"、"我家的猫"→"猫"。"""
@@ -791,6 +836,7 @@ class MemoryBank:
                             "low_conf_buffered": 0, "visual_written": 0}
         self.pending_confirms = []  # 待主动确认的事实 [{"fact_id","ts"}]
         self.active_confirm = None  # 已问出、等老人答复 {"fact_id","ts"}
+        self.pending_profile = None # 待老人确认的人物档案 {"rel","name","quote","ts","stage"}
         self._reflect_imp = 0
         self._reflect_cnt = 0
         self._last_reflect_try = 0.0
@@ -820,6 +866,7 @@ class MemoryBank:
                                  if k in self.write_stats})
         self.pending_confirms = data.get("pending_confirms", []) or []
         self.active_confirm = data.get("active_confirm") or None
+        self.pending_profile = data.get("pending_profile") or None
         self._reflect_imp = data.get("reflect_imp", 0)
         self._reflect_cnt = data.get("reflect_cnt", 0)
         self._last_reflect_try = data.get("last_reflect_try", 0.0)
@@ -845,6 +892,7 @@ class MemoryBank:
             "short_term_buffer": self.short_term_buffer, "write_stats": self.write_stats,
             "pending_confirms": self.pending_confirms,
             "active_confirm": self.active_confirm,
+            "pending_profile": self.pending_profile,
             "reflect_imp": self._reflect_imp, "reflect_cnt": self._reflect_cnt,
             "last_reflect_try": self._last_reflect_try,
             "last_confirm_ask": self._last_confirm_ask,
@@ -1253,6 +1301,49 @@ class MemoryBank:
             return {"kind": "scene", "scene": best, "label": best}
         return {"kind": "scene", "scene": None, "label": None}
 
+    def _resolve_time(self, q, now):
+        """时间维度解析（F-4 时间线）："2024"、"2024年5月"、"2024-05"、
+        "今年""去年""上个月""这个月"。认不出返回 None（前端提示换个说法）。
+        返回 {"kind":"time","label":"2024年","start":ts,"end":ts}，区间左闭右开。"""
+        q = str(q or "").strip()
+        if not q:
+            return None
+        cur = datetime.fromtimestamp(now)
+        m = re.search(r"(?:19|20)\d{2}", q)
+        year = int(m.group(0)) if m else None
+        month = None
+        if year is not None:
+            mm = re.search(r"(?:年|[-/.])(\d{1,2})月?", q)
+            if mm and 1 <= int(mm.group(1)) <= 12:
+                month = int(mm.group(1))
+        elif "去年" in q:
+            year = cur.year - 1
+        elif "今年" in q or "本年" in q:
+            year = cur.year
+        elif "上个月" in q or "上月" in q:
+            first_this = datetime(cur.year, cur.month, 1)
+            last_month_end = first_this
+            last_month_start = datetime(cur.year - 1, 12, 1) if cur.month == 1 \
+                else datetime(cur.year, cur.month - 1, 1)
+            year, month = last_month_start.year, last_month_start.month
+            return {"kind": "time", "label": f"{year}年{month}月",
+                    "start": _time.mktime(last_month_start.timetuple()),
+                    "end": _time.mktime(last_month_end.timetuple())}
+        if year is None:
+            return None
+
+        if month is not None:
+            start = datetime(year, month, 1)
+            end = datetime(year + 1, 1, 1) if month == 12 else datetime(year, month + 1, 1)
+            label = f"{year}年{month}月"
+        else:
+            start = datetime(year, 1, 1)
+            end = datetime(year + 1, 1, 1)
+            label = f"{year}年"
+        return {"kind": "time", "label": label,
+                "start": _time.mktime(start.timetuple()),
+                "end": _time.mktime(end.timetuple())}
+
     @staticmethod
     def _search_item(mem, score):
         """检索结果条目（JSON 可序列化；facts 带 history 供"旧值可查"）
@@ -1277,7 +1368,8 @@ class MemoryBank:
 
     def search(self, query, by="object", k=10, now=None):
         """统一检索入口（B-5，供 /api/memory/search、B-8 盲盒、F-4 时间线调用）。
-        by ∈ person|object|scene；复用三因子打分（新近性×重要性×相关性）。
+        by ∈ person|object|scene|time；复用三因子打分（新近性×重要性×相关性），
+        time 维度例外：只按事情发生时间倒序（翻时间线就是按时间看）。
         只读检索：不强化、不改动记忆（翻时间线≠回忆强化，防浏览把记忆越翻越牢）。
         返回 {"by","query","resolved","results":[...]}：
           - person.resolved.kind ∈ profile|visitor|pet|self|fallback_visitor
@@ -1286,9 +1378,9 @@ class MemoryBank:
         """
         by = str(by or "").strip().lower()
         q = str(query or "").strip()
-        if by not in ("person", "object", "scene"):
+        if by not in ("person", "object", "scene", "time"):
             return {"by": by, "query": q, "resolved": None, "results": [],
-                    "message": "by 只支持 person/object/scene"}
+                    "message": "by 只支持 person/object/scene/time"}
         if not q:
             return {"by": by, "query": "", "resolved": None, "results": [],
                     "message": "空查询"}
@@ -1330,7 +1422,7 @@ class MemoryBank:
                 scored = sorted(((self._score(m, q, now) + _boost(m), m) for m in pool),
                                 key=lambda x: -x[0])
                 resolved = {"kind": "object", "label": q, "object": q}
-            else:   # scene
+            elif by == "scene":
                 resolved = self._resolve_scene(q)
                 canon = resolved.get("scene")
                 words = SCENE_LEXICON.get(canon, []) + ([canon] if canon else [])
@@ -1345,6 +1437,16 @@ class MemoryBank:
                     pool = [m for m in pool if similarity(q, self._mem_text(m)) > 0]
                 scored = sorted(((self._score(m, q, now), m) for m in pool),
                                 key=lambda x: -x[0])
+            else:   # time（F-4 时间线第四维）：按事情发生的先后排，不按三因子打分
+                resolved = self._resolve_time(q, now)
+                if resolved is None:
+                    scored = []
+                else:
+                    start, end = resolved["start"], resolved["end"]
+                    pool = [m for m in pool
+                            if start <= float(m.get("ts", 0)) < end]
+                    scored = sorted(((0.0, m) for m in pool),
+                                    key=lambda x: -float(x[1].get("ts", 0)))
             results = [self._search_item(m, s) for s, m in scored[:k]]
         return {"by": by, "query": q, "resolved": resolved, "results": results}
 
@@ -1526,6 +1628,79 @@ class MemoryBank:
             if removed:
                 self._save()
             return removed
+
+    def handle_person_profile_chat(self, text, call="奶奶", now=None):
+        """人物建档的聊天闭环（F-4 / H-3 口径，供 app.chat_response 调用，不调模型）：
+          - "这是我孙子豆豆 / 我孙子叫豆豆" → 小忆复述确认（不直接写）
+          - "对/是" → 写入档案（姓名+称谓）；"不对，叫毛毛" → 改名字再确认
+          - 只说了"这是我孙子"没名字 → 先问名字，问到再确认
+          - "以后别叫豆豆了" → 删档案（退回三类，不再叫人名）
+        返回回复文案；None = 与建档无关 / 老人暂时在说别的（放行正常聊天）。
+        绝不猜：名字没听清、句式不像陈述，一律不写。"""
+        t = str(text or "").strip()
+        if not t or len(t) > 40:
+            return None
+        now = now or self.clock()
+
+        with self._lock:
+            pend = self.pending_profile
+            if pend and now - float(pend.get("ts", 0)) > CONFIRM_TTL:
+                self.pending_profile = None   # 超时作废：上次没答完的确认不再挂着
+                pend = None
+            if pend:
+                if pend.get("stage") == "ask_name":
+                    name = _profile_name_from_reply(t)
+                    if not name:
+                        return None           # 老人在说别的：不接管，等他说名字
+                    pend["name"] = name
+                    pend["stage"] = "confirm"
+                    pend["ts"] = now
+                    self._save()
+                    return f"好，我记下了：{name} 是您的{pend['rel']}，对吧？"
+                act, new_value = classify_confirm_reply(t)
+                if act is None:
+                    return None               # 不是"对/不对"：留着待确认，不抢话
+                if act == "yes":
+                    name, rel = pend.get("name"), pend.get("rel")
+                    self.pending_profile = None
+                    res = self.add_person_profile(
+                        name, rel, quote=pend.get("quote") or t, now=now)
+                    if res.get("ok"):
+                        return (f"好嘞{call}，我记住了：{name} 是您的{rel}。"
+                                f"以后您一提{name}，我就知道是自家人了。")
+                    return f"{call}，名字我没记准，您再说一遍？"
+                if new_value:
+                    pend["name"] = new_value
+                    pend["ts"] = now
+                    self._save()
+                    return f"那我改成{new_value}。{new_value} 是您的{pend['rel']}，对吧？"
+                self.pending_profile = None
+                self._save()
+                return "好好，那我先不乱记。您想让我记的时候，再说一声就行。"
+
+            # ① 先看"别提这个人"（删档案）
+            m = _PROFILE_REMOVE_RE.search(t)
+            if m:
+                name = _norm_value(m.group("name")).strip("了吧啊呀呢")
+                removed = self.remove_person_profile(name)
+                if removed:
+                    return f"好，往后我不提{name}了。"
+                return f"我这儿没有记过{name}，就不提这个名字了。"
+
+            # ② 主动陈述："这是我孙子豆豆" / "我孙子叫豆豆" / "这是我孙子，叫豆豆"
+            m = _PROFILE_INTRO_RE.search(t) or _PROFILE_CALL_RE.search(t)
+            if not m:
+                return None               # 不是建档句式：放行正常聊天（AI 不猜）
+            rel = m.group("rel")
+            name = _norm_value(m.groupdict().get("name") or "").strip("了吧啊呀呢")
+            self.pending_profile = {
+                "rel": rel, "name": name, "quote": t[:60], "ts": now,
+                "stage": "confirm" if name else "ask_name",
+            }
+            self._save()
+            if name:
+                return f"我记下了：{name} 是您的{rel}，对吧？"
+            return f"好，您的{rel}叫什么名字呀？告诉我，我记下来。"
 
     # ---- B-4：视觉条目写入护栏（四类规则的统一执行点，B-2/H-2 帧源调用）----
     def _zone_blocked(self, position):

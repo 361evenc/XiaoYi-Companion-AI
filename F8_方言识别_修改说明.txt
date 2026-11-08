@@ -1,0 +1,125 @@
+F-8 方言识别 —— 修改说明
+======================================================================
+修改日期：2026-11-08
+任务卡：F-8（负责人：前端 + 后端模型选型对照；优先级 P1；里程碑 P1）
+前置：《数据集调研笔记》（已存在，本卡启动前已核对，前置有实物）
+
+一、修改原因
+----------------------------------------------------------------------
+1) 任务要求按《数据集调研笔记》做方言 ASR，方言清单与数据来源写死（不猜），
+   并把《方言分布统计》作为第 1 周先行交付物。
+2) ASR 是 AI 能力不是前端能力（O-9）：方言能不能上线必须由后端闸门判定，
+   前端只做唤醒/打断/方言切换的体验链路，不能自己接一套选型。
+3) 验收口径写死：上线清单 = 分布 Top3 ∩ WER ≤ 基线×0.8；交集为空 → 本功能 hold，
+   不硬上。没有基线数字就不能说「低 20%」。
+4) 声音复刻是 P1 最后一项、单独评审（先过显式同意 + 伦理审查，而已故亲人走红线#10），
+   本卡明确不做，只记录“默认关”的安全姿态，防止被顺手做。
+
+二、修改内容
+----------------------------------------------------------------------
+后端
+1. 新增 backend/services/dialect_service.py
+   - 三份数据文件：dialect_distribution.json（分布统计）、dialect_eval.json（WER 实测/基线）、
+     dialect_profile.json（通道③「老人使用的方言」）。
+   - 闸门：online = Top3 ∩ (WER ≤ 基线×0.8) ∩ 有引擎参数；交集为空 → hold。
+   - 诚实拒绝：未上线方言固定话术「我还没学会听X方言，等我学好了。」，不返回残文。
+   - 声音复刻 VOICE_CLONE = enabled: False，只有开关位和前置说明，没有任何复刻接口。
+   - 采集表单选项写死为《数据集调研笔记》已记录的 ElderWell 方言（河南/东北/山东/上海/湖北），
+     并注明“这是采集选项，不是上线清单”。
+2. 新增 backend/api/dialect_api.py
+   - GET  /api/dialect/config       闸门状态 + 选项 + 分布/WER 现状
+   - GET  /api/dialect/profile      已填方言
+   - POST /api/dialect/profile      子女端/上门人员选填（只进统计，不直接决定 ASR）
+   - GET  /api/dialect/distribution 三通道统计原文
+3. backend/main.py 挂载 dialect_api。F-7 的 /api/child 路由白名单刻意未动。
+4. ASR 链路接方言闸门
+   - backend/api/voice.py：ASRRequest 增加 dialect 字段；/api/asr 返回
+     {text, refused, reply, dialect}。
+   - backend/services/voice_service.py：先过 dialect_service.asr_gate；
+     拒绝时不调引擎、text 为空；上线方言才把 hint 交给引擎。
+   - app.py：transcribe_audio(audio_input, dialect_hint=None)，只按后端给的
+     cluster/language 改请求体，不在 app.py 里猜方言参数（默认行为不变）。
+5. 新增 dialect_report.py（第 1 周交付物生成器）
+   - 通道①：conversations.json 方言特征词命中（明确标注“不是方言判定，不进 Top3”）；
+   - 通道②：dialect_interview/*.json(l)（H-5 访谈记录，当前缺失）；
+   - 通道③：dialect_profile.json（子女端表单，当前无人填）；
+   - WER harness：dialect_eval/<方言名>/refs.txt + baseline_hyp.txt + dialect_hyp.txt
+     + asr.json，字级编辑距离，聚合 WER = 总编辑距离/总参考字数；
+   - 产出：dialect_distribution.json、dialect_eval.json、方言分布统计.md。
+
+前端
+6. frontend/src/stores/session.js：新增 dialect（默认普通话）并本地持久化。
+7. frontend/src/views/Chat.vue：人格栏下方新增「小忆听」方言 chips；
+   - 只有 supported=true 的方言能切过去；
+   - 未上线方言点一下 → 大字幕 + 语音：「我还没学会听X方言，等我学好了。咱先用普通话聊，好不好？」；
+   - 录音识别传 dialect；后端 refused=true 时直说、不硬发；刷新后若方言已下架自动回普通话。
+8. frontend/src/views/ChildHome.vue：新增「老人说的方言（选填）」表单（通道③），
+   保存后只进统计，页面写明“小忆还没学会时会直说，不假装听懂”。
+9. frontend/src/api/index.js：dialectConfig / dialectProfile / setDialectProfile。
+
+文档 / 测试
+10. 数据集调研笔记.md：新增「四、方言 ASR：能用的、缺的（F-8 前置核对）」，
+    写清 SeniorTalk/ElderWell/CCC 都不能直接做方言 ASR、三通道现状、上线口径、当前 hold。
+11. 方言分布统计.md（生成物，第 1 周交付物）。
+12. test_dialect_gating.py（7 条 Python 闸门用例）。
+13. frontend/tests/f8_guardrails.mjs（5 条固定检查）。
+
+三、验收对照（诚实记录，未达成的单独列出）
+----------------------------------------------------------------------
+已达成（可验证）：
+- 《方言分布统计》先行交付：三通道齐全度、缺口、Top3 口径、WER 闸门结论都在
+  方言分布统计.md 里；每次运行 dialect_report.py 重算，不手填。
+- 上线清单 = 分布 Top3 ∩ WER 达标（∩ 引擎参数）；交集为空 → hold。
+  当前实测：Top3 无法给出、上线清单为空、hold（原因见报告第五节）。
+- 未上线方言诚实拒绝：/api/asr 实测返回 refused=true + 固定话术，且不调引擎。
+- 声音复刻默认关：config.voice_clone.enabled=false，无复刻接口。
+
+未达成（受客观数据限制，无法在本机补齐，未用假数字凑验收）：
+1) WER 基线：当前环境没有老人方言语料/人工转写，也没有可用的方言引擎参数，
+   基线无法实测；脚本只认 dialect_eval/ 下的实测文件，没有就写「未测定」。
+2) 「目标方言 WER ≤ 基线 × 0.8」：基线未定死，比率无法计算；闸门保持 hold。
+3) 通道②（H-5 访谈方言记录）：仓库内没有实物，报告标「缺失」。
+4) 通道③：接口与表单已做，但还没有真实填写，报告标「暂无」。
+5) 亲属声音复刻：按任务卡不在本卡范围，未实现（只有默认关的开关位）。
+
+补齐方式（数据到位后不需要改代码）：
+1) H-5 访谈记录放 dialect_interview/*.jsonl，字段 dialect/text；
+2) 子女端首次激活时填「老人使用的方言」；
+3) 每个目标方言建 dialect_eval/<方言名>/，放 refs.txt 与 baseline_hyp.txt（同一批音频），
+   跑 python dialect_report.py 定死基线；
+4) 后端三人共审给出方言引擎参数写 asr.json，方言模型结果放 dialect_hyp.txt，再跑一次脚本；
+   此时 online 会自动出现在 /api/dialect/config 与前端「小忆听」。
+
+四、验证命令与结果
+----------------------------------------------------------------------
+1) python dialect_report.py
+   → 三通道已标注样本 0；Top3 无法给出；上线清单无；hold。
+2) python test_dialect_gating.py
+   → Ran 7 tests, OK（含：无数据 hold、交集闸门、诚实拒绝且不调引擎、复刻默认关、WER/Top3 口径）。
+3) cd frontend && node tests/f8_guardrails.mjs
+   → PASS：F-8 方言识别 5 条固定检查全部通过。
+4) cd frontend && npm run build
+   → 构建成功（131 modules，dist 正常产出）。
+5) 回归：python test_child_privacy.py（Ran 5, OK）；node tests/f7_guardrails.mjs（PASS）。
+6) 接口实测（临时 8011 端口，已停止）：
+   - GET /api/dialect/config → hold=true、online=[]、voice_clone.enabled=false；
+   - POST /api/asr {dialect:"河南话"} → refused=true、reply="我还没学会听河南方言，等我学好了。"；
+   - POST /api/dialect/profile {dialect:"闽南语"} → ok=false（表单里没有的不猜着收）。
+7) 浏览器实测（127.0.0.1:5173 + 8010，验证后已停止）：
+   - 聊天页出现「小忆听」chips：普通话 + 五个方言均标「还在学」；
+   - 点击「河南方言」→ 小忆消息与语音均为「我还没学会听河南方言，等我学好了。咱先用普通话聊，好不好？」，
+     选中态仍为普通话（没有偷偷切过去）；
+   - 子女端出现「老人说的方言（选填）」卡片、下拉框（还没填/河南/东北/山东/上海/湖北/其他）与保存按钮，
+     页面写明「只用于统计…不假装听懂」。
+   注：验证过程没有点「保存」，通道③仍是「暂无」，分布报告保持 0 标注样本、hold。
+
+五、已知边界与说明
+----------------------------------------------------------------------
+1) 方言「引擎参数」不在本卡猜：dialect_eval.json 的 asr 字段必须由后端选型给出；
+   缺参数时即使 WER 达标也不上线，报告会写明“缺引擎参数”。
+2) 前端方言 chips 只展示《数据集调研笔记》已记录的五个采集选项，不扩猜其它方言；
+   老人说清单外的方言，走「其他方言」由子女/上门人员填写，只进统计。
+3) 通道①特征词表是启发式，只用于观察对话里的方言痕迹；报告已写明它不参与 Top3，
+   避免把“词表命中”当成“方言人口占比”。
+4) 本卡没有改动 F-7 的子女端路由白名单与隐私口径；方言表单是新增的采集字段，
+   不读聊天、不写老人记忆。

@@ -6,14 +6,36 @@
     </header>
 
     <div class="content">
-      <section class="card">
-        <h2 class="section-title">隐私说明（大白话）</h2>
-        <div class="privacy-text">
-          <p>小忆会把和您聊的重要事情记在心里，这样下次才能接着陪您聊。</p>
-          <p>这些记忆都保存在您自己的设备上，不会上传到别处。</p>
-          <p>您随时可以说「忘掉这件事」，小忆就会立刻删掉对应的记忆。</p>
-          <p>想全部清空也可以，点下面的按钮，一键删掉所有记忆和聊天记录。</p>
-        </div>
+      <!-- F-3：隐私政策大字版入口（能念给老人听，有不明白的可逐条问） -->
+      <section class="card entry-card">
+        <h2 class="section-title">小忆怎么记您的话</h2>
+        <p class="entry-sub">大字版，能念给您听；有不放心的地方，一条一条问小忆。</p>
+        <button class="btn btn-primary entry-btn" type="button" @click="$router.push('/privacy/policy')">
+          📖 打开隐私说明
+        </button>
+        <p v-if="consentText" class="entry-consent">✅ 您已在 {{ consentText }} 说过“我懂了”。</p>
+      </section>
+
+      <!-- F-7 子女远程安心：老人始终知道孩子能看到什么，也能随时关（关掉不影响自己用） -->
+      <section class="card child-watch-card">
+        <h2 class="section-title">孩子能看到什么</h2>
+        <p class="watch-text">
+          孩子能看到您的<b>吃药和心情概况</b>，<b>看不到聊天内容</b>。
+        </p>
+        <p class="watch-state" :class="{ off: !childEnabled }">
+          {{ childEnabled ? '现在开着：孩子能看到这些概况。' : '现在关着：孩子看不到您的概况。' }}
+        </p>
+        <button
+          class="btn"
+          :class="childEnabled ? 'btn-danger' : 'btn-secondary'"
+          type="button"
+          :disabled="childSaving || childLoading"
+          @click="toggleChildWatch"
+        >
+          {{ childSaving ? '正在改…' : childEnabled ? '关掉，不让孩子看' : '打开，让孩子看' }}
+        </button>
+        <p class="watch-note">关掉只是孩子看不到，您该提醒还提醒、该聊天还聊天。</p>
+        <p v-if="childMsg" class="watch-msg">{{ childMsg }}</p>
       </section>
 
       <section class="card">
@@ -40,13 +62,23 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useSessionStore } from '../stores/session'
 import { api } from '../api'
+import { CONSENT_KEY, formatTime } from '../data/privacyPolicy'
 
 const router = useRouter()
 const session = useSessionStore()
+
+// F-3：入口卡上显示"已经同意过"的时间（同意记录只存在本机）
+const consentText = ref('')
+try {
+  const rec = JSON.parse(localStorage.getItem(CONSENT_KEY) || 'null')
+  if (rec && rec.at) consentText.value = formatTime(rec.at)
+} catch (e) {
+  console.warn('[privacy] 读取同意记录失败', e)
+}
 
 const forgetText = ref('')
 const forgetting = ref(false)
@@ -54,6 +86,43 @@ const result = ref('')
 const resultOk = ref(false)
 const wiping = ref(false)
 const wipeMsg = ref('')
+
+// F-7：老人端也能独立关掉「子女远程安心」（默认开；关掉不影响自己用）
+const childEnabled = ref(false)
+const childLoading = ref(true)
+const childSaving = ref(false)
+const childMsg = ref('')
+
+async function loadChildWatch() {
+  childLoading.value = true
+  try {
+    const res = await api.childConsent()
+    childEnabled.value = !!(res.data && res.data.enabled)
+  } catch (e) {
+    childMsg.value = '没读到开关状态，请确认后端已启动。'
+  } finally {
+    childLoading.value = false
+  }
+}
+
+async function toggleChildWatch() {
+  if (childSaving.value || childLoading.value) return
+  childSaving.value = true
+  childMsg.value = ''
+  try {
+    const res = await api.setChildConsent({ enabled: !childEnabled.value })
+    childEnabled.value = !!(res.data && res.data.enabled)
+    childMsg.value = childEnabled.value
+      ? '打开了，孩子能看到您的吃药和心情概况，还是看不到聊天内容。'
+      : '关上了，孩子看不到您的概况了。'
+  } catch (e) {
+    childMsg.value = '没改成功，请稍后再试。'
+  } finally {
+    childSaving.value = false
+  }
+}
+
+onMounted(loadChildWatch)
 
 async function doForget() {
   const text = forgetText.value.trim()
@@ -119,10 +188,23 @@ async function confirmWipe() {
   font-size: var(--font-subtitle);
   color: var(--color-text);
 }
-.privacy-text p {
-  margin: 0 0 10px;
+.entry-card {
+  border-left: 6px solid var(--color-accent2);
+}
+.entry-sub {
+  margin: 0 0 14px;
   font-size: var(--font-body);
-  color: var(--color-text);
+  line-height: 1.7;
+  color: var(--color-text-sub);
+}
+.entry-btn {
+  min-height: 56px;
+  font-size: var(--font-bubble);
+}
+.entry-consent {
+  margin: 12px 0 0;
+  font-size: var(--font-body);
+  color: var(--color-accent2);
 }
 .row {
   display: flex;
@@ -147,6 +229,34 @@ async function confirmWipe() {
   color: var(--color-danger);
 }
 .result-tip.ok {
+  color: var(--color-accent2);
+}
+.child-watch-card {
+  border-left: 6px solid var(--color-accent);
+}
+.watch-text {
+  margin: 0 0 10px;
+  font-size: var(--font-body);
+  line-height: 1.7;
+  color: var(--color-text);
+}
+.watch-state {
+  margin: 0 0 14px;
+  font-size: var(--font-body);
+  font-weight: 700;
+  color: var(--color-accent2);
+}
+.watch-state.off {
+  color: var(--color-danger);
+}
+.watch-note {
+  margin: 12px 0 0;
+  font-size: var(--font-small);
+  color: var(--color-text-sub);
+}
+.watch-msg {
+  margin: 10px 0 0;
+  font-size: var(--font-body);
   color: var(--color-accent2);
 }
 </style>

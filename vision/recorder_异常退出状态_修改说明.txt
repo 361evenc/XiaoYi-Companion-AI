@@ -1,0 +1,80 @@
+H-2 异常退出状态修复 —— 修改说明
+======================================
+
+修改时间：2026-11-08
+修改文件：d:\C盘迁移\Desktop_XY\XiaoYi-Companion-AI\vision\recorder.py
+（仅改 RecordingController._run 的异常收尾部分，状态机其它逻辑未动）
+
+一、修改原因（问题现象）
+------------------------
+启动持续录制时如果失败（典型场景：缺 vision/models/yolov8n.pt，
+或没装 opencv / ultralytics），describe_frame.load_model() 会执行 sys.exit(1)。
+
+SystemExit 继承自 BaseException，不会被 recorder 里的 `except Exception` 捕获，
+于是异常直接漏到 `finally`。而旧代码的 finally 是：
+
+    if self._state != ST_FAULT:
+        self._set(ST_RELEASED, "已停止并释放设备")
+
+此时状态还是 CLOSING（不是 FAULT），所以被兜底写成 released。
+而 status() 里 released 会令 confirmed_off = True。
+
+结果：启动根本没成功，后端却对外宣称"已停止 / 可以确定没在录（confirmed_off=true）"，
+前端也有机会显示"我现在不看啦"——这正是 H-2 明令禁止的"假装关了"。
+
+二、修改内容
+------------------------
+1. _run 单独捕获 SystemExit（原异常处理之前）：
+
+    except SystemExit as e:
+        self._set(ST_FAULT, f"录制线程异常退出（启动阶段退出，code={e.code}）")
+
+   —— 启动阶段退出 = 没开起来，落 fault（前端显示"我没法确定"）。
+
+2. finally 收尾区分"主动停"和"意外退出"，不再无条件写 released：
+
+    stopping = self._stop_flag.is_set()
+    if stopping:
+        if st != ST_RELEASED:
+            self._set(ST_RELEASED, "已停止并释放设备")
+    elif st != ST_FAULT:
+        self._set(ST_FAULT, "录制线程意外退出，未确认设备已释放")
+
+   - 只有用户/接口主动 stop（stop_flag 已置）才允许落 released；
+   - 其它任何退出（异常 / SystemExit / BaseException / 未知原因）一律 fault；
+   - 已经是 fault 的不覆盖，保留更可信的原始故障描述；
+   - 启动过程中被 stop 时状态已是 released 的，不再覆盖 detail，保留"启动过程中被停止"。
+
+三、未改动的部分（有意保留）
+------------------------
+- describe_frame.load_model() 仍保留 sys.exit(1)：它被多个 CLI 脚本（perception_service、
+  explain_world、fall_guard、photo_scene 等）共用，改成抛异常会改变这些入口的退出行为。
+  本次只在 recorder 线程内拦截 SystemExit，影响面最小。
+- verify() / stop() 的原有语义未动：故障态仍需硬件验证才能升级为 released，
+  故障 != 停止 的原则保持。
+
+四、验证结果（本机无 cv2 / 无 yolov8n.pt，用真实缺模型路径 + 桩模块)
+------------------------
+A. 真实场景：source=camera 且缺权重
+   - start -> ok=False，state=fault，confirmed_off=False
+   - detail = "录制线程异常退出（启动阶段退出，code=1）"
+   - 修改前：state=released、confirmed_off=True（错误）
+
+B. 模拟源 + 桩 describe_frame（模拟正常录制）
+   - start -> recording
+   - 主动 stop -> released，confirmed_off=True
+   - verify -> released（模拟源无硬件，状态即释放状态）
+
+C. 线程被 BaseException（KeyboardInterrupt）意外打断、未调用 stop
+   - state=fault，confirmed_off=False
+   - detail = "录制线程意外退出，未确认设备已释放"
+
+三项全部通过。前端 VisionStatus.vue 已有对应分支（ok!==true 且 fault 时按"启动失败"话术），
+后端改为 fault 后前端展示"我没法确定"，不会再出现"我现在不看啦"。
+
+五、如何复核
+------------------------
+1. 本机未装视觉依赖时，直接点"让小忆看"：
+   GET /api/vision/status 应为 state=fault、confirmed_off=false。
+2. 装好 opencv 与 yolov8n.pt 后：start -> recording；stop -> verified=released、confirmed_off=true。
+3. 审计日志 vision/data/recorder_events.jsonl 中可见 state_change: closing -> fault。

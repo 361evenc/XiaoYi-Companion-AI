@@ -1,4 +1,4 @@
-"""语音接口：TTS 整段合成 + ASR 识别。"""
+"""语音接口：TTS 整段合成 + ASR 识别（F-8 起支持方言选择）。"""
 from fastapi import APIRouter
 from pydantic import BaseModel
 
@@ -17,6 +17,8 @@ class TTSRequest(BaseModel):
 
 class ASRRequest(BaseModel):
     audio_base64: str = ""
+    # F-8：方言由前端切换，后端闸门决定「能不能听」；未上线的方言不调引擎
+    dialect: str | None = None
 
 
 @router.post("/tts")
@@ -28,4 +30,4 @@ def api_tts(req: TTSRequest):
 
 @router.post("/asr")
 def api_asr(req: ASRRequest):
-    return {"text": voice_service.asr(req.audio_base64)}
+    return voice_service.asr(req.audio_base64, dialect=req.dialect)

@@ -80,6 +80,12 @@ uploads/
 node_modules/
 dist/
 
+# ===== F-7 子女端 / F-8 方言：运行时数据（含老人状态，不入库） =====
+# 子女端只读摘要的开关/回执/每日概况
+child_portal.json
+# 通道③「老人使用的方言」采集结果（随用随填，不入库）
+dialect_profile.json
+
 # ===== B-11 微信语音呼叫（2026-11-07） =====
 # 紧急联系人（真实姓名+电话，隐私数据）
 emergency_contact.json

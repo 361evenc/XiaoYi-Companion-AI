@@ -18,6 +18,7 @@ export const useSessionStore = defineStore('session', {
     surname: '',            // 老人姓氏
     gender: '女',          // 称呼性别
     personality: '踏实务实', // 小忆性格（音色随之切换）
+    dialect: '普通话',       // F-8 小忆听的方言（只存后背端闸门校验过的选项）
     isMuted: false,         // 静音开关
     convId: null,           // 当前对话 id
     initialized: false,     // 是否已走完欢迎页
@@ -45,6 +46,10 @@ export const useSessionStore = defineStore('session', {
       this.personality = p
       this.save()
     },
+    setDialect(d) {
+      this.dialect = d || '普通话'
+      this.save()
+    },
     toggleMute() {
       this.isMuted = !this.isMuted
       this.save()
@@ -56,6 +61,7 @@ export const useSessionStore = defineStore('session', {
           surname: this.surname,
           gender: this.gender,
           personality: this.personality,
+          dialect: this.dialect,
           isMuted: this.isMuted,
           convId: this.convId,
           initialized: this.initialized,

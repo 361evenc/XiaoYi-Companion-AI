@@ -11,7 +11,8 @@ from backend.core import config  # noqa: F401  先切 sys.path 与 CWD
 from backend.core.state import engine
 from backend.core import background
 from backend.api import (chat, voice, history, memory, reminder, ws, emergency,
-                         vision, callvision, fallsafety, photo_scene_api, explain_api)
+                         vision, callvision, fallsafety, photo_scene_api, explain_api,
+                         child_api, dialect_api)
 
 app = FastAPI(title="小忆陪伴 · 后端服务")
 
@@ -40,6 +41,8 @@ app.include_router(callvision.router)  # H-12：通话识别结论/删除（无�
 app.include_router(fallsafety.router)  # H-7：跌倒告警状态/转报（无喂帧接口）
 app.include_router(photo_scene_api.router)  # H-4：老照片猜+确认 / 说明书只读不判断
 app.include_router(explain_api.router)  # H-13：解释外界（安全优先，无强制解释入口）
+app.include_router(child_api.router)  # F-7：子女端只读摘要（无聊天/无会话路由）
+app.include_router(dialect_api.router)  # F-8：方言闸门/采集表单（上线清单由后端算）
 
 
 @app.get("/api/health")

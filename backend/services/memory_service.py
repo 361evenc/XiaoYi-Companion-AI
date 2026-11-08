@@ -96,8 +96,9 @@ def emotion_chart():
 
 
 def search(q, by="object", k=10):
-    """统一记忆检索（B-5）：按人 person / 按物 object / 按场景 scene 三维检索。
-    供 F-4 时间线、B-8 盲盒等调用。返回 {"ok", by, query, resolved, results}。"""
+    """统一记忆检索（B-5）：按人 person / 按物 object / 按场景 scene / 按时间 time。
+    供 F-4 时间线、B-8 盲盒等调用。返回 {"ok", by, query, resolved, results}。
+    time：q 支持"2024""2024年5月""去年""上个月"，按发生时间倒序（F-4 第四维）。"""
     q = str(q or "").strip()
     by = str(by or "").strip().lower() or "object"
     if not q:
