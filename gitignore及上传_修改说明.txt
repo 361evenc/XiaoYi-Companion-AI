@@ -29,3 +29,30 @@ https://github.com/361evenc/XiaoYi-Companion-AI.git）。
 【验证】
 git status 显示本地与 origin/main 完全同步，无未推送提交；
 暂存内容已确认未混入 node_modules/dist/photos/uploads 等目录。
+
+============================================================
+补充：F-7/F-8 运行时数据排除（2026-11-08）
+------------------------------------------------------------
+
+【修改原因】
+F-7 子女端只读摘要与 F-8 方言通道③会在本地生成运行时数据：
+- child_portal.json：安心开关、购药回执、每日概况（含老人当天状态）
+- dialect_profile.json：老人使用的方言（采集结果，随用随填）
+这两份都是“随用随建”的本地状态，不是代码/交付物；按仓库既有惯例
+（reminders.json、memory_bank.json、emotion_log.json 不入库），不应上传。
+
+【修改内容】
+1. .gitignore 追加：
+   child_portal.json
+   dialect_profile.json
+2. 本次上传提交：97ac5a5
+   F-1~F-8 体验线交付：找物展示/录制开关/隐私政策/时间线/温和依赖/
+   拍图引导/子女端/方言闸门（66 files changed, +8922 / -58）
+   推送结果：1348593..97ac5a5  main -> main（已同步）
+3. 未入库的运行数据（本地保留）：child_portal.json、dialect_profile.json；
+   方言统计与基线记录 dialect_distribution.json、dialect_eval.json
+   属于 F-8 第 1 周交付证据（不含个人信息），照常入库。
+
+【验证】
+git status 显示 main...origin/main，工作区干净；
+暂存清单确认没有 child_portal.json / dialect_profile.json。
