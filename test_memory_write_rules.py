@@ -127,7 +127,8 @@ class TestVisualIngest(unittest.TestCase):
         self.assertEqual(res["action"], "written")
         ep = bank.episodes[-1]
         self.assertEqual(ep["source"], "visual")
-        self.assertEqual(ep["scene"], "客厅")
+        self.assertEqual(ep["scene"], "unknown")   # T-2：scene MVP 统一 "unknown"
+        self.assertEqual(ep["room"], "客厅")        # T-2：房间级标签进内部字段 room
         self.assertIn("降压药", ep["text"])
         # 高置信条目可被 B-5 检索到（长期记忆有效）
         out = bank.search("降压药", by="object")

@@ -336,6 +336,94 @@ export function createWarmDependency(options = {}) {
     player = fn
   }
 
+  // ============================================================
+  // T-6 定稿：机制5 自然回忆触发 + 量化指标埋点（B-10 验收引用）
+  // ============================================================
+
+  // 量化指标埋点（防成瘾效果量化）
+  const metrics = {
+    reverseAsk: { initiated: 0, responded: 0 },
+    blindBox: { played: 0, positive: 0, negativeFeedback: 0 },
+    bottle: { collected: 0, replayed: 0 },
+    prelude: { played: 0, mismatch: 0 },
+    naturalRecall: { triggered: 0, positiveDialogMinutes: [] },
+  }
+
+  function recordMetric(mechanism, field, value = 1) {
+    if (metrics[mechanism] && field in metrics[mechanism]) {
+      if (typeof metrics[mechanism][field] === 'number') {
+        metrics[mechanism][field] += value
+      } else if (Array.isArray(metrics[mechanism][field])) {
+        metrics[mechanism][field].push(value)
+      }
+    }
+  }
+
+  function getMetrics() {
+    // 机制1：反向索取 → 回应率（统计前提≥20次发起）
+    const ra = metrics.reverseAsk
+    // 机制2：盲盒 → 正向占比 + 负面反馈率（统计前提≥50次播放）
+    const bb = metrics.blindBox
+    // 机制3：收集瓶 → 回放率（初值，P1实测后回填）
+    const bt = metrics.bottle
+    // 机制4：前奏音 → 零误响（20次播放抽查）
+    const pl = metrics.prelude
+    // 机制5：自然回忆 → 回忆后正向对话时长中位数（初值，P1实测后回填）
+    const nr = metrics.naturalRecall
+    const mins = nr.positiveDialogMinutes.slice().sort((a, b) => a - b)
+    const median = mins.length > 0
+      ? mins[Math.floor(mins.length / 2)].toFixed(1) + 'min' : 'N/A'
+    return {
+      reverseAsk: {
+        responseRate: ra.initiated > 0
+          ? (ra.responded / ra.initiated * 100).toFixed(1) + '%' : 'N/A',
+        initiated: ra.initiated, responded: ra.responded,
+      },
+      blindBox: {
+        positiveRatio: bb.played > 0
+          ? (bb.positive / bb.played * 100).toFixed(1) + '%' : 'N/A',
+        negativeFeedbackRate: bb.played > 0
+          ? (bb.negativeFeedback / bb.played * 100).toFixed(1) + '%' : 'N/A',
+        played: bb.played,
+      },
+      bottle: {
+        replayRate: bt.collected > 0
+          ? (bt.replayed / bt.collected * 100).toFixed(1) + '%' : 'N/A',
+        collected: bt.collected, replayed: bt.replayed,
+      },
+      prelude: { mismatch: pl.mismatch, played: pl.played },
+      naturalRecall: {
+        positiveDialogDurationMedian: median,
+        triggered: nr.triggered,
+      },
+    }
+  }
+
+  // 机制5：自然回忆触发（老人提到某个人/物/事 → 触发回忆）
+  // 护栏：频率硬上限（一天 maxPerDay 次）/ 无连续（30分钟内不连触发）/ 无悬念
+  function triggerNaturalRecall(text, opts = {}) {
+    const s = load()
+    const nr = T6_PARAMS.naturalRecall
+    if (!nr.enabled) return { ok: false, reason: 'disabled' }
+    const todayCount = (s.naturalRecallCount && s.naturalRecallCount[s.date]) || 0
+    if (todayCount >= nr.maxPerDay) {
+      return { ok: false, reason: 'limit_reached', phrase: T6_PARAMS.limitPhrase }
+    }
+    if (s.lastNaturalRecallTs && (Date.now() - s.lastNaturalRecallTs) < 30 * 60 * 1000) {
+      return { ok: false, reason: 'too_soon', phrase: T6_PARAMS.limitPhrase }
+    }
+    s.naturalRecallCount = { ...(s.naturalRecallCount || {}), [s.date]: todayCount + 1 }
+    s.lastNaturalRecallTs = Date.now()
+    write(s)
+    recordMetric('naturalRecall', 'triggered')
+    return { ok: true, phrase: nr.phrase, keyword: opts.keyword || '' }
+  }
+
+  // 记录自然回忆后的正向对话时长（分钟，供中位数计算）
+  function recordRecallDialog(minutes) {
+    recordMetric('naturalRecall', 'positiveDialogMinutes', Number(minutes) || 0)
+  }
+
   return {
     peekBox,
     openBox,
@@ -352,6 +440,11 @@ export function createWarmDependency(options = {}) {
     getWeatherAnswer,
     markWeatherAnswered,
     setPreludePlayer,
+    // T-6 定稿：机制5 自然回忆触发 + 量化指标
+    triggerNaturalRecall,
+    recordRecallDialog,
+    recordMetric,
+    getMetrics,
   }
 }
 

@@ -1,8 +1,8 @@
 """语音服务：TTS 整段合成 + ASR 识别（火山引擎）。
 
 封装旧版 app.text_to_speech / app.transcribe_audio，只做参数规整。
-F-8：方言 ASR 先过 dialect_service 闸门——未上线方言不调引擎、不硬上，
-直接回「我还没学会听X方言，等我学好了」。
+F-8：方言 ASR 先过 dialect_service 闸门。本构建不做分方言 ASR（各地方言模型
++ 语料不在本构建内），闸门恒放行、一律按普通话识别（覆盖大多数地域口音）。
 """
 import base64
 import os

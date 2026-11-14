@@ -36,6 +36,7 @@
 import json
 import math
 import os
+import random
 import re
 import threading
 import time as _time
@@ -50,6 +51,14 @@ __all__ = [
     "SCENE_LEXICON", "VISITOR_WORDS", "PET_WORDS",
     "CORRECT_INTENT_RE", "OLD_VALUE_Q_RE",
     "SENSITIVE_SCENES", "DEDUP_WINDOW_SECONDS", "VISUAL_HIGH_CONFIDENCE",
+    # T-2：记忆条目 11 字段标准模板（契约层）
+    "MEMORY_FIELDS", "MEMORY_FIELD_DEFAULTS",
+    "PERSON_SELF", "PERSON_VISITOR", "PERSON_PET", "PERSON_UNKNOWN", "PERSON_CLASSES",
+    "SCENE_UNKNOWN", "LONG_TERM_CONF_GATE",
+    "SENSITIVE_LOW", "SENSITIVE_MEDIUM", "SENSITIVE_HIGH",
+    "HIGH_EVENT_FALL", "HIGH_EVENT_INACTIVITY", "HIGH_EVENT_ZONE", "HIGH_EVENT_THIRDPARTY",
+    "HIGH_SENSITIVE_EVENT_TYPES", "HIGH_SENSITIVE_RECORD_FIELDS",
+    "judge_sensitive", "classify_person", "new_memory_id", "missing_template_fields",
     "EmergencyContactStore", "EMERGENCY_CALL_RE", "_extract_phone",
 ]
 
@@ -205,9 +214,11 @@ def _norm_key(key):
     # 依据：Fellegi & Sunter (1969) record linkage——同一实体的不同表述须归一到
     # 规范键再合并；_add_fact 的 (field,key) 冲突分支随即生效：新的覆盖旧的。
     if k.endswith("位置"):
-        # 已是规范键：只剥"位置"前的"的"（"药的位置"→"药位置"），重跑归一会误伤
-        # （"放大镜位置"→"大镜位置"）
+        # 剥"位置"前的"的"和位置动词（"降压药存放位置"→"降压药位置"），让"放哪/存放"
+        # 两种写法归一到同一键、新的覆盖旧的；只剥整词动词（存放/放在/搁在/收在），
+        # 不碰单个"放/搁/存/收"，避免"放大镜位置"→"大镜位置"这类误伤
         base = k[:-2].rstrip("的")
+        base = re.sub(r"存放在?|放在|搁在|收在", "", base).rstrip("的")
         return (f"{base}位置" if base else k)[:12]
     if _LOCATION_KEY_RE.search(k):
         obj = _LOCATION_KEY_RE.sub("", k).rstrip("的")
@@ -704,6 +715,146 @@ DEDUP_WINDOW_SECONDS = 30 * 60       # 去重窗口：同物品+同动作+同位
 VISUAL_HIGH_CONFIDENCE = 0.8         # ≥0.8 进长期记忆（episodes）；<0.8 只进短期缓存
 SHORT_TERM_BUFFER_CAP = 50           # 低置信短期缓存滚动上限（不进记忆箱、检索不可见）
 
+# ---------------------------------------------------------------- T-2：记忆条目 11 字段标准模板（P0 地基）
+# 契约层：凡进入长期记忆/短期缓存的条目（facts / episodes / 4字段事件记录）
+# 必须带齐 11 字段；内部运行字段（id/ts/strength/importance/recall_count/quotes/
+# history/room 等）是引擎簿记，不算契约内容。完整规则见 docs/templates/记忆条目模板_11字段.md。
+
+MEMORY_FIELDS = ("memory_id", "time", "person", "object", "action", "location",
+                 "scene", "event", "source", "confidence", "sensitive")
+MEMORY_FIELD_DEFAULTS = {
+    "person": "未知", "object": "", "action": "", "location": "",
+    "scene": "unknown", "event": "", "source": "text",
+    "confidence": 0.0, "sensitive": "低",
+}
+
+# person：只有四类，识别不出填"未知"、不猜（猜错人物=叫错名的信任爆点）
+PERSON_SELF = "老人本人"
+PERSON_VISITOR = "访客"
+PERSON_PET = "宠物"
+PERSON_UNKNOWN = "未知"
+PERSON_CLASSES = (PERSON_SELF, PERSON_VISITOR, PERSON_PET, PERSON_UNKNOWN)
+
+# scene：MVP 期统一填 "unknown"（场景分类后置；unknown 条目不参与按场景标签检索）
+SCENE_UNKNOWN = "unknown"
+
+# 长期记忆写入门控（文本与视觉同值，= 不编造机制）：
+# confidence < 0.8 不进长期记忆（文本路径：挂起条目，检索/画像/注入不可见，
+# 老人确认或重抽 conf≥0.8 后转正；视觉路径：只进短期缓存）
+LONG_TERM_CONF_GATE = 0.8
+
+# sensitive 判定表（写死、确定性），优先级：高 > 中 > 低
+#   高   = 第三方个人信息(可指认到人) 或 敏感区域(卧室/卫生间等) 或 安全事件(跌倒疑似/长时间无活动)
+#          → 长期只写 4 字段事件记录(memory_id/time/事件类型/confidence)，不记画面/细节/第三方
+#          → 删除路径按 memory_id（事件类型+时间定位，不需原话）
+#   中   = 健康/用药 → 可写长期，展示面只限子女端只读+老人本人
+#   低   = 其余日常
+SENSITIVE_LOW, SENSITIVE_MEDIUM, SENSITIVE_HIGH = "低", "中", "高"
+HIGH_EVENT_FALL = "跌倒疑似"
+HIGH_EVENT_INACTIVITY = "长时间无活动"
+HIGH_EVENT_ZONE = "敏感区域事件"
+HIGH_EVENT_THIRDPARTY = "第三方信息"
+HIGH_SENSITIVE_EVENT_TYPES = (HIGH_EVENT_FALL, HIGH_EVENT_INACTIVITY,
+                              HIGH_EVENT_ZONE, HIGH_EVENT_THIRDPARTY)
+# 高敏感事件记录的唯一长期内容字段
+HIGH_SENSITIVE_RECORD_FIELDS = ("memory_id", "time", "event", "confidence")
+
+# 安全事件（跌倒疑似/长时间无活动）：文本关键词（感知侧可直传 event_type）
+SAFETY_FALL_RE = re.compile(r"摔倒|跌倒|滑倒|晕倒|摔伤|摔疼|摔跤|跟头|摔了一跤")
+SAFETY_INACTIVITY_RE = re.compile(
+    r"(?:好几天|大半天|半天|一整天|长时间|好久|一直)没动|没动过")
+# 健康/用药（中）：field=健康/用药，或内容沾药/症状
+HEALTH_MED_RE = re.compile(
+    r"药|血压|血糖|血脂|胰岛素|降糖|高血压|糖尿病|心脏病|冠心病|中风"
+    r"|疼|痛|头晕|眩晕|乏力|咳嗽|发烧|失眠|心悸|胸闷")
+
+
+def new_memory_id(now, taken=None):
+    """T-2：memory_id = 毫秒时间戳 + 随机4位数字，写入时生成、不可变。
+    taken = 已用 memory_id 集合（碰撞重试）。"""
+    ts_ms = int(float(now or 0) * 1000)
+    cand = f"{ts_ms}{random.randint(0, 9999):04d}"
+    guard = 0
+    while taken and cand in taken and guard < 16:
+        cand = f"{ts_ms}{random.randint(0, 9999):04d}"
+        guard += 1
+    return cand
+
+
+def _ts_to_time(ts):
+    """T-2：契约字段 time = 本地 ISO 8601（秒级，人可读）；内部 ts 仍存 epoch 秒。"""
+    try:
+        return datetime.fromtimestamp(float(ts)).isoformat(timespec="seconds")
+    except Exception:
+        return ""
+
+
+def judge_sensitive(*, text="", field="", key="", value="", location="",
+                    event_type="", third_party=False):
+    """T-2 sensitive 判定表（写死、确定性）。返回 (level, high_event_label)。
+    - 安全事件判全内容（text/key/value/location）；
+    - 敏感区域只判 location（条目的位置）——口头顺带提"卧室"不触发
+      （B-4：语音路径无隐私边界，老人的嘴没有、摄像头才有）；
+    - third_party：调用方判定"可指认到人的第三方"（视觉路径目前由 B-4 上游
+      拒写/只记"有人来过"先行处理）。"""
+    if third_party:
+        return SENSITIVE_HIGH, HIGH_EVENT_THIRDPARTY
+    et = str(event_type or "")
+    if et in (HIGH_EVENT_FALL, HIGH_EVENT_INACTIVITY):
+        return SENSITIVE_HIGH, et
+    content = " ".join(str(x) for x in (text, key, value, location) if x)
+    if SAFETY_FALL_RE.search(content):
+        return SENSITIVE_HIGH, HIGH_EVENT_FALL
+    if SAFETY_INACTIVITY_RE.search(content):
+        return SENSITIVE_HIGH, HIGH_EVENT_INACTIVITY
+    if any(s in str(location or "") for s in SENSITIVE_SCENES):
+        return SENSITIVE_HIGH, HIGH_EVENT_ZONE
+    if field in ("健康", "用药") or HEALTH_MED_RE.search(content):
+        return SENSITIVE_MEDIUM, ""
+    return SENSITIVE_LOW, ""
+
+
+def classify_person(text, source="text"):
+    """T-2：person 四类（识别不出填"未知"，不猜）。
+    - visual：摄像头不判"谁干的"（B-4 第三方不记身份）→ 未知
+    - text：宠物词→宠物；访客词→访客；家庭关系词→未知（家人不在四类）；
+            第一人称→老人本人；其余→未知。顺序自上而下。"""
+    t = str(text or "")
+    if source == "visual" or not t:
+        return PERSON_UNKNOWN
+    if any(w in t for w in PET_WORDS):
+        return PERSON_PET
+    if any(w in t for w in VISITOR_WORDS):
+        return PERSON_VISITOR
+    if _FAMILY_RELATION_RE.search(t):
+        return PERSON_UNKNOWN
+    if any(w in t for w in SELF_WORDS):
+        return PERSON_SELF
+    return PERSON_UNKNOWN
+
+
+def missing_template_fields(item):
+    """T-2 验收检查：返回缺失/不合规的契约字段列表（空=合规，供三方交叉验证调用）。
+    高敏感 4 字段事件记录按 4 字段口径（memory_id/time/event/confidence）；
+    其余条目按 11 字段全量口径。"""
+    it = item or {}
+    is_high = (bool(it.get("high_sensitive"))
+               or str(it.get("event", "")) in HIGH_SENSITIVE_EVENT_TYPES)
+    required = HIGH_SENSITIVE_RECORD_FIELDS if is_high else MEMORY_FIELDS
+    gaps = [k for k in required if k not in it or it.get(k) is None]
+    if not is_high:
+        if it.get("person") not in PERSON_CLASSES and "person" not in gaps:
+            gaps.append("person")
+        if it.get("sensitive") not in (SENSITIVE_LOW, SENSITIVE_MEDIUM,
+                                       SENSITIVE_HIGH) and "sensitive" not in gaps:
+            gaps.append("sensitive")
+    try:
+        float(it.get("confidence"))
+    except (TypeError, ValueError):
+        if "confidence" not in gaps:
+            gaps.append("confidence")
+    return gaps
+
 # 免看清单口头配置（确定性流程，不调模型）：卧室/卫生间这类标准场景词归一后增删，
 # 认不出的说法（"电视别看了"）不接管，放行给正常聊天
 _IGNORE_ZONE_ADD_RE = re.compile(
@@ -833,7 +984,8 @@ class MemoryBank:
         self.visual_dedup_log = {}   # 去重窗口："{物}|{动作}|{位置}" -> 最后写入 ts
         self.short_term_buffer = [] # 低置信视觉条目短期缓存（不进记忆箱、检索不可见）
         self.write_stats = {"blocked_by_zone": 0, "blocked_by_dedup": 0,
-                            "low_conf_buffered": 0, "visual_written": 0}
+                            "low_conf_buffered": 0, "visual_written": 0,
+                            "safety_events": 0}
         self.pending_confirms = []  # 待主动确认的事实 [{"fact_id","ts"}]
         self.active_confirm = None  # 已问出、等老人答复 {"fact_id","ts"}
         self.pending_profile = None # 待老人确认的人物档案 {"rel","name","quote","ts","stage"}
@@ -878,6 +1030,10 @@ class MemoryBank:
                 self._id_seq = max(self._id_seq, seq)
             except (ValueError, IndexError, AttributeError):
                 pass
+        # T-2：旧条目回填 11 字段契约（存量语义不变：person 默认"未知"不猜、
+        # long_term 默认 True——本来就在长期）
+        for _it in self.episodes + self.facts + self.short_term_buffer:
+            self._ensure_template_fields(_it)
 
     def _save(self):
         # 剪枝防膨胀：情节300 / 事实200 / 反思30 / 待确认5
@@ -905,6 +1061,88 @@ class MemoryBank:
     def _next_id(self, prefix, now):
         self._id_seq = (self._id_seq + 1) % 100000
         return f"{prefix}{int(now * 1000)}_{self._id_seq:05d}"
+
+    def _next_memory_id(self, now):
+        """T-2：生成 memory_id（毫秒时间戳+随机4位，生成后不可变）。调用方持锁。"""
+        taken = {e.get("memory_id") for e in self.episodes + self.facts + self.short_term_buffer}
+        return new_memory_id(now, taken)
+
+    def _high_sensitive_event_record(self, event_label, confidence, now, source="text"):
+        """T-2：高敏感 4 字段事件记录——高敏感条目在长期记忆里的唯一内容形态。
+        内容字段只有 memory_id/time/事件类型/confidence：不记画面/细节/第三方，
+        不存原话（quote）。删除路径按 memory_id（事件类型+时间定位，见 forget_by_memory_id）。
+        其余键是内部运行字段（引擎簿记），不算 4 字段内容。"""
+        return {
+            "id": self._next_id("ev", now),
+            # ---- 4 字段内容契约 ----
+            "memory_id": self._next_memory_id(now),
+            "time": _ts_to_time(now),
+            "event": str(event_label),
+            "confidence": round(float(confidence), 3),
+            # ---- 内部运行字段（引擎簿记）----
+            "ts": now,
+            "source": source,
+            "sensitive": SENSITIVE_HIGH,
+            "high_sensitive": True,
+            "long_term": True,
+            "importance": 9,
+            "strength": IMPORTANT_EVENT_MIN_STRENGTH_DAYS,   # 安全/敏感事件慢衰减（≥60天）
+            "recall_count": 0, "last_recall": now,
+        }
+
+    def _ensure_template_fields(self, it):
+        """T-2：条目缺失契约字段回填（旧数据/导入数据；确定性，认不出填"未知"不猜）。幂等。"""
+        if not isinstance(it, dict):
+            return
+        if not it.get("memory_id"):
+            it["memory_id"] = self._next_memory_id(it.get("ts", 0))
+        if not it.get("time"):
+            it["time"] = _ts_to_time(it.get("ts", 0))
+        is_visual = (it.get("source") == "visual" or "event_type" in it
+                     or "furniture" in it)
+        if "person" not in it:
+            it["person"] = PERSON_UNKNOWN        # 旧数据：不猜
+        if "source" not in it:
+            it["source"] = "visual" if is_visual else "text"
+        if "scene" not in it:
+            it["scene"] = SCENE_UNKNOWN
+        if "object" not in it:
+            it["object"] = it.get("key", "")
+        if "action" not in it:
+            if "key" in it:
+                it["action"] = "declare"
+            elif is_visual:
+                it["action"] = next((v for v, w in (("place", "放下"), ("take", "拿走"),
+                                                     ("appear", "瞅见"))
+                                     if w in str(it.get("text", ""))), "appear")
+            else:
+                it["action"] = "say"
+        if "location" not in it:
+            if "key" in it:
+                it["location"] = (it.get("value", "")
+                                  if str(it.get("key", "")).endswith("位置") else "")
+            elif is_visual:
+                it["location"] = f"{it.get('room') or it.get('scene', '')}{it.get('furniture', '')}"
+            else:
+                it["location"] = ""
+        if "event" not in it:
+            if "text" in it:
+                it["event"] = it["text"]
+            elif "key" in it:
+                k, v = it.get("key", ""), it.get("value", "")
+                it["event"] = (f"{k}是{v}" if k and k != v else v)
+            else:
+                it["event"] = ""
+        if "sensitive" not in it:
+            it["sensitive"] = judge_sensitive(
+                text=str(it.get("text", "")),
+                field=str(it.get("field", "")),
+                key=str(it.get("key", "")),
+                value=str(it.get("value", "")),
+                location=str(it.get("location", "")),
+                event_type=str(it.get("action", "")) if is_visual else "")[0]
+        if "long_term" not in it:
+            it["long_term"] = True      # 旧数据已在长期：不改既有行为
 
     # ---- 在线抽取（每轮对话后调用）----
     def observe(self, user_text, assistant_text="", now=None):
@@ -934,41 +1172,99 @@ class MemoryBank:
                       f"{f.get('value')}（原话中找不到）")
         raw = grounded
         if not raw:
+            # T-2：无可抽事实时，若整句是高敏感安全事件（如"我摔了一跤"）也留 4 字段事件记录
+            level, label = judge_sensitive(text=user_text)
+            if level == SENSITIVE_HIGH:
+                with self._lock:
+                    rec = self._high_sensitive_event_record(label, 0.9, now, source="text")
+                    self.episodes.append(rec)
+                    self._reflect_imp += 9
+                    self._reflect_cnt += 1
+                    self._save()
+                    return {"new": [], "updated": [], "episode": rec["id"],
+                            "reflection": None, "high_sensitive": [label]}
             return {"new": [], "updated": [], "episode": None, "reflection": None}
         # Bug⑤c：quote 缺失时回填来源分句，回答/画像均可溯源
         for f in raw:
             if not f.get("quote"):
                 f["quote"] = _source_span(f["value"], user_text)
 
+        # T-2：先过敏感判定表（写死）——高敏感事实不写细节，只留 4 字段事件记录
+        kept, high_records = [], []
+        for f in raw[:3]:
+            level, label = judge_sensitive(
+                field=f.get("field", ""), key=f.get("key", ""), value=f.get("value", ""),
+                location=f.get("value", "") if str(f.get("key", "")).endswith("位置") else "")
+            if level == SENSITIVE_HIGH:
+                if not any(r["event"] == label for r in high_records):
+                    high_records.append(self._high_sensitive_event_record(
+                        label, 0.9, now, source="text"))
+            else:
+                kept.append(f)
+        # T-2：话语级安全事件兜底——抽取事实没命中时（如 LLM 把跌倒抽碎），
+        # 安全事件本身必须留 4 字段记录（与事实级 label 去重；zone 词不在话语级判，见 judge_sensitive）
+        level_t, label_t = judge_sensitive(text=user_text)
+        if level_t == SENSITIVE_HIGH and not any(r["event"] == label_t for r in high_records):
+            high_records.append(self._high_sensitive_event_record(
+                label_t, 0.9, now, source="text"))
+
         with self._lock:
             new_ids, updated_ids = [], []
-            for f in raw[:3]:
+            for f in kept:
                 fid, is_new = self._add_fact(now=now, **f)
                 (new_ids if is_new else updated_ids).append(fid)
-            imp_max = max(f["importance"] for f in raw)
-            ep = {
-                "id": self._next_id("e", now),
-                "text": "、".join(f"{f['key']}是{f['value']}" if f["key"] != f["value"]
-                                  else f["value"] for f in raw[:3]),
-                "quote": user_text[:60],
-                "field": raw[0]["field"],
-                "ts": now, "importance": imp_max,
-                # 反馈9：重要事件情节的衰减同样放慢（>=8 分至少 60 天）
-                "strength": (max(_strength_days(imp_max, is_fact=False),
-                                 IMPORTANT_EVENT_MIN_STRENGTH_DAYS)
-                             if imp_max >= IMPORTANT_EVENT_MIN_IMP
-                             else _strength_days(imp_max, is_fact=False)),
-                "recall_count": 0, "last_recall": now,
-            }
-            self.episodes.append(ep)
-            self._reflect_imp += imp_max
-            self._reflect_cnt += 1
+            for r in high_records:
+                self.episodes.append(r)
+
+            ep = None
+            if kept:
+                imp_max = max(f["importance"] for f in kept)
+                ep_text = "、".join(f"{f['key']}是{f['value']}" if f["key"] != f["value"]
+                                    else f["value"] for f in kept)
+                ep_conf = min(f.get("confidence", 0.8) for f in kept)
+                ep = {
+                    "id": self._next_id("e", now),
+                    "text": ep_text,
+                    "quote": user_text[:60],
+                    "field": kept[0]["field"],
+                    "ts": now, "importance": imp_max,
+                    # 反馈9：重要事件情节的衰减同样放慢（>=8 分至少 60 天）
+                    "strength": (max(_strength_days(imp_max, is_fact=False),
+                                     IMPORTANT_EVENT_MIN_STRENGTH_DAYS)
+                                 if imp_max >= IMPORTANT_EVENT_MIN_IMP
+                                 else _strength_days(imp_max, is_fact=False)),
+                    "recall_count": 0, "last_recall": now,
+                    # T-2：11 字段契约（location=本轮位置类事实值；scene MVP 统一 unknown；
+                    # confidence=本轮各事实 conf 最小值，<0.8 → long_term=False 挂起）
+                    "memory_id": self._next_memory_id(now),
+                    "time": _ts_to_time(now),
+                    "person": classify_person(user_text, "text"),
+                    "object": kept[0].get("key", ""),
+                    "action": "say",
+                    "location": next((f["value"] for f in kept
+                                      if str(f.get("key", "")).endswith("位置")), ""),
+                    "scene": SCENE_UNKNOWN,
+                    "event": ep_text,
+                    "source": "text",
+                    "confidence": round(ep_conf, 3),
+                    "sensitive": judge_sensitive(text=ep_text,
+                                                 field=kept[0].get("field", ""))[0],
+                    "long_term": ep_conf >= LONG_TERM_CONF_GATE,
+                }
+                self.episodes.append(ep)
+            if kept or high_records:
+                self._reflect_imp += max([f["importance"] for f in kept]
+                                         + ([9] if high_records else []))
+                self._reflect_cnt += 1
 
         refl = self._maybe_reflect(now)          # LLM 调用在锁外
         with self._lock:
             self._save()
-        return {"new": new_ids, "updated": updated_ids, "episode": ep["id"],
-                "reflection": refl}
+        return {"new": new_ids, "updated": updated_ids,
+                "episode": (ep["id"] if ep is not None
+                            else (high_records[0]["id"] if high_records else None)),
+                "reflection": refl,
+                "high_sensitive": [r["event"] for r in high_records]}
 
     def _extract_llm(self, user_text, assistant_text):
         prompt = EXTRACT_PROMPT.format(
@@ -986,6 +1282,14 @@ class MemoryBank:
         importance = _clamp_imp(importance)
         confidence = _clamp_conf(confidence)
 
+        # T-2：高敏感（写死判定表）——不写细节事实，只留 4 字段事件记录（不记画面/细节/第三方）
+        level, label = judge_sensitive(field=field, key=key, value=value,
+                                       location=value if key.endswith("位置") else "")
+        if level == SENSITIVE_HIGH:
+            rec = self._high_sensitive_event_record(label, confidence, now, source="text")
+            self.episodes.append(rec)
+            return (rec["id"], True)
+
         found = next((f for f in self.facts if f["field"] == field and f["key"] == key), None)
         if found is None:
             fact = {
@@ -1001,6 +1305,19 @@ class MemoryBank:
                              else _strength_days(importance, is_fact=True)),
                 "recall_count": 0, "last_recall": now,
                 "history": [], "ask_count": 0,
+                # T-2：11 字段契约（location=位置类键的 value；sensitive 按判定表）
+                "memory_id": self._next_memory_id(now),
+                "time": _ts_to_time(now),
+                "person": classify_person(quote or f"{key}{value}", "text"),
+                "object": key,
+                "action": "declare",
+                "location": value if key.endswith("位置") else "",
+                "scene": SCENE_UNKNOWN,
+                "event": (f"{key}是{value}" if key != value else value),
+                "source": "text",
+                "sensitive": judge_sensitive(field=field, key=key, value=value,
+                                             location=value if key.endswith("位置") else "")[0],
+                "long_term": confidence >= LONG_TERM_CONF_GATE,
             }
             self.facts.append(fact)
             if confidence < CONFIRM_CONF and importance >= 5:
@@ -1012,6 +1329,7 @@ class MemoryBank:
             found["ts"] = now
             found["strength"] = min(STRENGTH_CAP_DAYS, found["strength"] * 1.3 + 1.0)
             found["confidence"] = min(1.0, found["confidence"] + 0.15)
+            found["long_term"] = found["confidence"] >= LONG_TERM_CONF_GATE
             found["importance"] = max(found["importance"], importance)
             if quote and quote not in found["quotes"]:
                 found["quotes"] = (found["quotes"] + [quote])[-5:]
@@ -1026,8 +1344,13 @@ class MemoryBank:
         found["value"] = value
         found["ts"] = now
         found["confidence"] = confidence
+        found["long_term"] = confidence >= LONG_TERM_CONF_GATE
         found["importance"] = max(found["importance"], importance)
         found["quotes"] = [quote] if quote else []
+        found["sensitive"] = judge_sensitive(field=field, key=key, value=value,
+                                             location=value if key.endswith("位置") else "")[0]
+        found["location"] = value if key.endswith("位置") else ""
+        found["event"] = (f"{key}是{value}" if key != value else value)
         if confidence < CONFIRM_CONF:
             self._enqueue_confirm(found["id"], now)
         return (found["id"], False)
@@ -1133,7 +1456,10 @@ class MemoryBank:
 
     @staticmethod
     def _mem_text(mem):
-        """记忆的检索文本：情节/反思用原文；事实用键+值+首条原话（老人自己的措辞是最好的检索线索）"""
+        """记忆的检索文本：情节/反思用原文；事实用键+值+首条原话（老人自己的措辞是最好的检索线索）；
+        高敏感 4 字段事件记录只给事件类型（无细节）"""
+        if mem.get("high_sensitive"):
+            return f"[敏感事件] {mem.get('event', '')}"
         if "text" in mem:
             return mem["text"]
         text = f"{mem.get('key', '')}{mem.get('value', '')}"
@@ -1157,8 +1483,12 @@ class MemoryBank:
         与存活事实重复的情节（同一信息的踪迹）不再占检索名额。"""
         now = now or self.clock()
         with self._lock:
-            live_facts = [f for f in self.facts if retrievability(f, now) >= FORGET_THRESHOLD]
-            live_eps = [e for e in self.episodes if retrievability(e, now) >= FORGET_THRESHOLD]
+            live_facts = [f for f in self.facts
+                          if retrievability(f, now) >= FORGET_THRESHOLD
+                          and f.get("long_term") is not False]
+            live_eps = [e for e in self.episodes
+                        if retrievability(e, now) >= FORGET_THRESHOLD
+                        and e.get("long_term") is not False]
             live_refl = [r for r in self.reflections if retrievability(r, now) >= FORGET_THRESHOLD]
             # 去重：情节文本同时含某事实的键与值 → 视为该事实的踪迹，退出检索池
             dup_eps = {id(e) for e in live_eps
@@ -1183,7 +1513,9 @@ class MemoryBank:
         被强化，按遗忘曲线自然淡出——每轮对话都在"清理"不相关的记忆。"""
         now = now or self.clock()
         with self._lock:
-            live_facts = [f for f in self.facts if retrievability(f, now) >= FORGET_THRESHOLD]
+            live_facts = [f for f in self.facts
+                          if retrievability(f, now) >= FORGET_THRESHOLD
+                          and f.get("long_term") is not False]
             rel_facts = sorted((f for f in live_facts
                                 if similarity(query, self._mem_text(f)) > 0),
                                key=lambda f: -self._score(f, query, now))
@@ -1198,9 +1530,10 @@ class MemoryBank:
             used_keys = {f["key"] for f in facts}
             eps = [e for e in self.episodes
                    if retrievability(e, now) >= FORGET_THRESHOLD
-                   and similarity(query, e["text"]) > 0]
+                   and e.get("long_term") is not False
+                   and similarity(query, self._mem_text(e)) > 0]
             eps = [e for e in sorted(eps, key=lambda e: -self._score(e, query, now))
-                   if not any(k and k in e["text"] for k in used_keys)][:k_episodes]
+                   if not any(k and k in self._mem_text(e) for k in used_keys)][:k_episodes]
             refl = [r for r in self.reflections
                     if retrievability(r, now) >= FORGET_THRESHOLD
                     and similarity(query, r["text"]) > 0]
@@ -1221,7 +1554,7 @@ class MemoryBank:
                     item += f"（您说过：{q[:30]}）"
                 lines.append(f"- {item}")
             for e in eps:
-                lines.append(f"- 老人提过：{e['text']}")
+                lines.append(f"- 老人提过：{self._mem_text(e)}")
         if refl:
             lines.append("[你最近对老人的了解]")
             for r in refl:
@@ -1243,6 +1576,7 @@ class MemoryBank:
         with self._lock:
             in_range = [e for e in self.episodes
                         if retrievability(e, now) >= FORGET_THRESHOLD
+                        and e.get("long_term") is not False
                         and d0 <= datetime.fromtimestamp(e.get("ts", 0)).date() <= d1]
             in_range.sort(key=lambda e: (-e.get("importance", 0), -e.get("ts", 0)))
             picked = in_range[:k_episodes]
@@ -1262,7 +1596,7 @@ class MemoryBank:
         lines = [f"[老人问的是“{time_word}”（{span}）发生的事。回答只讲下面这些日期的事，"
                  "别掺今天的内容，记不清的就直说。]"]
         for e in picked:
-            lines.append(f"- {humanize_day(e.get('ts', 0), now)}：{e['text']}")
+            lines.append(f"- {humanize_day(e.get('ts', 0), now)}：{self._mem_text(e)}")
         return "\n".join(lines)
 
     # ---- B-5①：三维检索（按人/按物/按场景，统一入口）----
@@ -1347,7 +1681,13 @@ class MemoryBank:
     @staticmethod
     def _search_item(mem, score):
         """检索结果条目（JSON 可序列化；facts 带 history 供"旧值可查"）
-        类型判定：事实有 key 无 text；情节有 text；反思只剩 text 无 field。"""
+        类型判定：高敏感 4 字段记录带 high_sensitive；事实有 key 无 text；
+        情节有 text；反思只剩 text 无 field。"""
+        if mem.get("high_sensitive"):
+            # T-2：高敏感 4 字段事件记录——只显事件类型，无细节
+            return {"type": "event", "id": mem.get("id"), "ts": mem.get("ts", 0),
+                    "score": round(float(score), 3), "sensitive": SENSITIVE_HIGH,
+                    "text": f"[敏感事件] {mem.get('event', '')}", "quote": ""}
         if "key" in mem:
             mtype = "fact"
         elif "field" in mem:
@@ -1390,8 +1730,12 @@ class MemoryBank:
             k = 10
         now = now or self.clock()
         with self._lock:
-            pool = ([f for f in self.facts if retrievability(f, now) >= FORGET_THRESHOLD]
-                    + [e for e in self.episodes if retrievability(e, now) >= FORGET_THRESHOLD]
+            pool = ([f for f in self.facts
+                     if retrievability(f, now) >= FORGET_THRESHOLD
+                     and f.get("long_term") is not False]
+                    + [e for e in self.episodes
+                       if retrievability(e, now) >= FORGET_THRESHOLD
+                       and e.get("long_term") is not False]
                     + [r for r in self.reflections if retrievability(r, now) >= FORGET_THRESHOLD])
             if by == "person":
                 resolved = self._resolve_person(q)
@@ -1751,10 +2095,39 @@ class MemoryBank:
             self.visual_dedup_log = {k: v for k, v in self.visual_dedup_log.items()
                                      if (now - v) < DEDUP_WINDOW_SECONDS * 4}
             self.visual_dedup_log[dedup_key] = now
+            # T-2：location = 房间+家具（家具级粒度；面/层级 = spatial_annotate 升级项）；
+            # scene MVP 统一 "unknown"（房间级标签进内部字段 room，供找物/场景检索）
+            loc = f"{pos}{furniture}"
+            verb = {"place": "放下", "take": "拿走", "appear": "瞅见"}.get(event_type, "瞅见")
+            if event_type == "appear":
+                text = f"看见{obj}在{pos}" + (f"的{furniture}" if furniture else "")
+            else:
+                text = f"{obj}被{verb}了，在{pos}"
+            # T-2：敏感判定（写死判定表）：高敏感只写 4 字段事件记录（双保险——
+            # 原则已被 ① 区域拒写挡掉，漏网也不存细节）；安全事件是事实，
+            # 不论置信度一律 4 字段进长期
+            level, label = judge_sensitive(text=text, location=loc, event_type=event_type)
+            if level == SENSITIVE_HIGH:
+                rec = self._high_sensitive_event_record(label, conf, now, source="visual")
+                self.episodes.append(rec)
+                self.write_stats["visual_written"] += 1
+                self._save()
+                return {"action": "written", "entry": rec}
             # ③④ 分级写入：低置信只进短期缓存（不进记忆箱、检索不可见）；高置信进长期
             entry = {"event_type": event_type, "object": obj, "position": pos,
                      "furniture": str(furniture or ""), "confidence": round(conf, 3),
-                     "ts": now}
+                     "ts": now,
+                     # T-2：11 字段契约（短期缓存同模板）
+                     "memory_id": self._next_memory_id(now),
+                     "time": _ts_to_time(now),
+                     "person": PERSON_UNKNOWN,
+                     "action": event_type,
+                     "location": loc,
+                     "scene": SCENE_UNKNOWN,
+                     "event": text,
+                     "source": "visual",
+                     "sensitive": level,
+                     "long_term": False}
             if conf < VISUAL_HIGH_CONFIDENCE:
                 entry["id"] = self._next_id("vb", now)
                 self.short_term_buffer.append(entry)
@@ -1762,20 +2135,80 @@ class MemoryBank:
                 self.write_stats["low_conf_buffered"] += 1
                 self._save()
                 return {"action": "buffered", "entry": entry}
-            verb = {"place": "放下", "take": "拿走", "appear": "瞅见"}.get(event_type, "瞅见")
-            if event_type == "appear":
-                text = f"看见{obj}在{pos}" + (f"的{furniture}" if furniture else "")
-            else:
-                text = f"{obj}被{verb}了，在{pos}"
             ep = {"id": self._next_id("ve", now), "text": text, "quote": text,
                   "field": "物品", "ts": now, "importance": 4 if conf < 0.9 else 5,
                   "strength": 1.0, "recall_count": 0, "last_recall": now,
-                  "source": "visual", "scene": pos, "confidence": round(conf, 3),
-                  "object": obj, "furniture": str(furniture or "")}
+                  "source": "visual", "room": pos, "confidence": round(conf, 3),
+                  "object": obj, "furniture": str(furniture or ""),
+                  # T-2：11 字段契约
+                  "memory_id": self._next_memory_id(now),
+                  "time": _ts_to_time(now),
+                  "person": PERSON_UNKNOWN,
+                  "action": event_type,
+                  "location": loc,
+                  "scene": SCENE_UNKNOWN,
+                  "event": text,
+                  "sensitive": level,
+                  "long_term": True}
             self.episodes.append(ep)
             self.write_stats["visual_written"] += 1
             self._save()
             return {"action": "written", "entry": ep}
+
+    # ---- T-2：高敏感安全事件（感知侧/紧急线 t5 的统一写入入口）----
+    def ingest_safety_event(self, event_label, confidence=0.9, ts=None, source="perception"):
+        """T-2：高敏感安全事件（跌倒疑似/长时间无活动）只写 4 字段事件记录。
+        感知侧（T-1）/紧急线（t5）信号触发后调用：内容字段只有
+        memory_id/time/事件类型/confidence——不记画面、不记细节、不记第三方。
+        删除：forget_by_memory_id（或 locate_by_event(event, ts) 先查 id）。"""
+        now = ts if ts is not None else self.clock()
+        label = str(event_label or "").strip()
+        if label not in HIGH_SENSITIVE_EVENT_TYPES:
+            return {"action": "invalid", "reason": "unknown_event_type"}
+        try:
+            conf = max(0.0, min(1.0, float(confidence)))
+        except (TypeError, ValueError):
+            conf = 0.9
+        with self._lock:
+            rec = self._high_sensitive_event_record(label, conf, now, source=source)
+            self.episodes.append(rec)
+            self.write_stats["safety_events"] = self.write_stats.get("safety_events", 0) + 1
+            self._save()
+            return {"action": "written", "entry": rec}
+
+    def locate_by_event(self, event_label, ts, window_seconds=600):
+        """T-2：按"事件类型+时间"定位条目 memory_id（高敏感删除路径的辅助入口，不需原话）。"""
+        with self._lock:
+            cands = [e for e in self.episodes
+                     if e.get("event") == str(event_label or "")
+                     and abs(float(e.get("ts", 0)) - float(ts)) <= window_seconds]
+            if not cands:
+                return None
+            return max(cands, key=lambda e: e.get("ts", 0)).get("memory_id")
+
+    def forget_by_memory_id(self, memory_id):
+        """T-2：删除路径按 memory_id（高敏感 4 字段事件记录按事件类型+时间定位，不需原话）。
+        跨 facts/episodes/short_term_buffer 查删，返回删除条数。"""
+        mid = str(memory_id or "").strip()
+        if not mid:
+            return 0
+        with self._lock:
+            before = (len(self.facts) + len(self.episodes)
+                      + len(self.short_term_buffer))
+            self.facts = [f for f in self.facts if f.get("memory_id") != mid]
+            self.episodes = [e for e in self.episodes if e.get("memory_id") != mid]
+            self.short_term_buffer = [b for b in self.short_term_buffer
+                                      if b.get("memory_id") != mid]
+            removed = before - (len(self.facts) + len(self.episodes)
+                                + len(self.short_term_buffer))
+            if removed:
+                live_ids = {f["id"] for f in self.facts}
+                self.pending_confirms = [c for c in self.pending_confirms
+                                         if c["fact_id"] in live_ids]
+                if self.active_confirm and self.active_confirm["fact_id"] not in live_ids:
+                    self.active_confirm = None
+                self._save()
+            return removed
 
     # ---- B-4：免看清单（口头配置：随时一句话增删，无设置界面——与零配置一致）----
     def add_ignore_zone(self, zone):
@@ -1836,7 +2269,9 @@ class MemoryBank:
             texts = [e.get("text", "") for e in visual_eps]
             dup_pairs = len(texts) - len(set(texts))
             sensitive_hits = [e for e in visual_eps
-                              if any(s in e.get("text", "") or s in e.get("scene", "")
+                              if any(s in e.get("text", "")
+                                     or s in (e.get("room", "") or e.get("scene", ""))
+                                     or s in e.get("location", "")
                                      for s in SENSITIVE_SCENES)]
             audit = {
                 "ts": now,
@@ -1890,7 +2325,8 @@ class MemoryBank:
                 if hit and (best is None or e.get("ts", 0) > best.get("ts", 0)):
                     best = e
             if best is not None:
-                scene = best.get("scene") or ""
+                # T-2：新条目 scene 统一 "unknown"，房间级标签在 room 字段（旧条目回退 scene）
+                scene = best.get("room") or best.get("scene") or ""
                 furn = best.get("furniture") or ""
                 position = f"{scene}的{furn}" if furn else scene
                 age_days = (now - best.get("ts", 0)) / 86400.0
@@ -1907,10 +2343,12 @@ class MemoryBank:
                         "has_clean_crop": False, "crop_url": None,
                         "stale": age_days > GRAPH_WINDOW_DAYS, "too_old": False,
                         "reply": reply}
-            # ---- L2 文字层（"您说过"，不冒充"我见过"）----
-            fact = self._find_fact_fuzzy(key=f"{obj}位置")
+            # ---- L2 文字层（"您说过"，不冒充"我见过"；T-2：只用已确认事实）----
+            def _vis(f):
+                return f if (f is not None and f.get("long_term") is not False) else None
+            fact = _vis(self._find_fact_fuzzy(key=f"{obj}位置"))
             if fact is None:
-                fact = self._find_fact_fuzzy(key=obj)
+                fact = _vis(self._find_fact_fuzzy(key=obj))
             if fact is not None and "位置" in fact.get("key", ""):
                 age_days = (now - fact.get("ts", 0)) / 86400.0
                 if age_days <= TEXT_MAX_DAYS:
@@ -1944,10 +2382,13 @@ class MemoryBank:
             self._reflect_cnt = 0
             if self.llm is None:
                 return None
-            eps = sorted(self.episodes, key=lambda e: -e.get("ts", 0))[:20]
-            ep_lines = "\n".join(f"- [{humanize_ago(e['ts'], now)}] {e['text']}" for e in eps)
+            eps = sorted([e for e in self.episodes if e.get("long_term") is not False],
+                         key=lambda e: -e.get("ts", 0))[:20]
+            ep_lines = "\n".join(f"- [{humanize_ago(e['ts'], now)}] {self._mem_text(e)}"
+                                 for e in eps)
             prof_lines = "\n".join(f"- {f['field']}｜{f['key']}：{f['value']}"
-                                   for f in self.facts[:30])
+                                   for f in self.facts[:30]
+                                   if f.get("long_term") is not False)
         try:
             txt = self.llm(REFLECT_PROMPT.format(episodes=ep_lines or "（暂无）",
                                                  profile=prof_lines or "（暂无）"))
@@ -2009,6 +2450,7 @@ class MemoryBank:
                 return None            # 老人在说别的：不接管，交给正常聊天
             if act == "yes":
                 fact["confidence"] = 1.0
+                fact["long_term"] = True
                 fact["strength"] = min(STRENGTH_CAP_DAYS, fact["strength"] * 1.5 + 1.0)
                 fact["last_recall"] = now
                 fact["recall_count"] += 1
@@ -2016,12 +2458,20 @@ class MemoryBank:
                 return confirm_yes_ack(persona, call, fact["key"], fact["value"])
             # act == "no"
             if new_value:
+                lv, _lbl = judge_sensitive(
+                    field=fact.get("field", ""), key=fact.get("key", ""), value=new_value,
+                    location=new_value if str(fact.get("key", "")).endswith("位置") else "")
+                if lv == SENSITIVE_HIGH:
+                    # T-2：更正值命中敏感区/安全事件不写入（不记细节），保留旧值
+                    self._save()
+                    return confirm_no_ack(persona, call)
                 fact["history"].append({"value": fact["value"], "ts": fact["ts"],
                                         "quote": fact["quotes"][0] if fact["quotes"] else ""})
                 fact["history"] = fact["history"][-5:]
                 fact["value"] = new_value
                 fact["ts"] = now
                 fact["confidence"] = 0.9
+                fact["long_term"] = True
                 self._save()
                 return confirm_no_ack(persona, call, new_value)
             self._save()
@@ -2035,6 +2485,8 @@ class MemoryBank:
             snap = {}
             for f in self.facts:
                 if retrievability(f, now) < FORGET_THRESHOLD:
+                    continue
+                if f.get("long_term") is False:
                     continue
                 snap.setdefault(f["field"], []).append({
                     "id": f["id"], "key": f["key"], "value": f["value"],
@@ -2095,13 +2547,16 @@ class MemoryBank:
 
         # 2) 记忆时间线
         if eps:
+            # T-2：高敏感 4 字段记录无 text——时间线显示事件类型（不显细节）
+            def _etext(e):
+                return e.get("text") or f"[敏感事件] {e.get('event', '')}"
             entries = "".join(
                 f"<div style='padding:4px 0 4px 16px;font-size:15px;position:relative;"
                 f"border-left:2px solid #C88A52;margin-bottom:2px;'>"
                 f"<span style='position:absolute;left:-5px;top:9px;width:8px;height:8px;"
                 f"border-radius:50%;background:#C88A52;'></span>"
-                f"{'⭐' if e.get('importance', 3) >= 7 else ''} {e['text']}"
-                f"{' ⏳待确认' if any(m in e['text'] for m in pending_marks) else ''}"
+                f"{'⭐' if e.get('importance', 3) >= 7 else ''} {_etext(e)}"
+                f"{' ⏳待确认' if any(m in _etext(e) for m in pending_marks) else ''}"
                 f"<span style='color:#aaa;font-size:12px;margin-left:4px;'>"
                 f"{humanize_ago(e['ts'], now)}</span></div>"
                 for e in reversed(eps))
@@ -2200,13 +2655,15 @@ class MemoryBank:
                 if (ts, content) in existing:
                     continue
                 field, imp = type_map.get(e.get("type"), ("其他", 3))
-                self.episodes.append({
+                new_ep = {
                     "id": self._next_id("e", ts),
                     "text": content, "quote": content, "field": field,
                     "ts": ts, "importance": imp,
                     "strength": _strength_days(imp, is_fact=False),
                     "recall_count": 0, "last_recall": ts,
-                })
+                }
+                self._ensure_template_fields(new_ep)   # T-2：导入条目同模板
+                self.episodes.append(new_ep)
                 n += 1
             self._save()
         return n
@@ -2231,15 +2688,20 @@ class EmergencyContactStore:
     NUDGE_INTERVAL = 24 * 3600   # 未设置提醒：每天一次
     CONFIRM_EXPIRE = 10 * 60     # 复述确认超时：10 分钟没答就作废重来（防陈旧确认）
 
-    def __init__(self, path="emergency_contact.json", clock=_time.time):
+    def __init__(self, path="emergency_contact.json", clock=_time.time,
+                 two_way_verify=False, memory_system=None):
         self.path = path
         self.clock = clock
+        self.two_way_verify = two_way_verify   # item6: 双向校验（老人自报路径）
+        self.memory_system = memory_system     # item7: 记忆系统引用（号码备份）
         self._lock = threading.RLock()
         self.contact = None
         self.pending = None
         self.call_log = []
         self._last_nudge_ts = 0.0
         self._caller = None            # 呼叫通道 callable（wechat_caller 注入）；None=诚实降级
+        self._verify_back4_pending = False  # item6: 后4位回读待确认
+        self.entry_status = None       # item5: 三路径状态跟踪
         self._load()
 
     def set_caller(self, fn):
@@ -2313,13 +2775,23 @@ class EmergencyContactStore:
                         "message": "刚才那个确认耽搁久了，您再报一遍，我重新记。"}
             ans = classify_confirm_reply(str(reply_text or ""))[0]
             if ans == "yes":
+                # item6: 双向校验（老人自报路径）——先要后4位回读，再落库
+                if self.two_way_verify and pend.get("source") == "elder":
+                    self._verify_back4_pending = True
+                    self._save()
+                    return {"ok": True, "action": "verify_back4",
+                            "message": "好，您再把号码后四位说一遍，我核对一下。"}
                 self.contact = {k: pend[k] for k in
                                 ("name", "phone", "relation", "source")}
                 self.contact["ts"] = now
                 self.contact["confirmed"] = True
                 self.pending = None
                 self._last_nudge_ts = 0.0      # 设好了，未设置提醒清零
+                self.entry_status = {"source": pend.get("source"),
+                                     "ts": now, "two_way": self.two_way_verify}
                 self._save()
+                # item7: 号码写记忆系统（高优先级条目，B-6 备份范围）
+                self._write_to_memory_system()
                 return {"ok": True, "action": "confirmed",
                         "message": ("记好啦——紧急联系人是" + self.contact["relation"]
                                     + self.contact["name"] + "，电话"
@@ -2332,6 +2804,72 @@ class EmergencyContactStore:
                         "message": "那就是我记岔了，您重新说一遍，我再核对。"}
             return {"ok": False, "action": "none",
                     "message": "您说对没错就是记好了，说不对咱就重来。"}
+
+    # ---- item6: 后4位回读比对（双向校验第二步，仅老人自报路径）----
+    def resolve_back4(self, reply_text, now=None):
+        """老人把后4位再说一遍→比对→符=confirmed / 不符=从头再来。
+        只在 two_way_verify=True + source=elder 路径要求（代填路径由代填人负责）。"""
+        now = now or self.clock()
+        with self._lock:
+            if not self._verify_back4_pending:
+                return {"ok": False, "action": "none",
+                        "message": "现在不需要核对后四位。"}
+            pend_phone = ""
+            name = relation = source = ""
+            if self.pending:
+                pend_phone = self.pending.get("phone", "")
+                name = self.pending.get("name", "")
+                relation = self.pending.get("relation", "") or "家人"
+                source = self.pending.get("source", "elder")
+            elif self.contact:
+                pend_phone = self.contact.get("phone", "")
+                name = self.contact.get("name", "")
+                relation = self.contact.get("relation", "") or "家人"
+                source = self.contact.get("source", "elder")
+            back4 = pend_phone[-4:] if len(pend_phone) >= 4 else ""
+            digits = re.sub(r"\D", "", str(reply_text or ""))
+            said_back4 = digits[-4:] if len(digits) >= 4 else digits
+            if back4 and said_back4 == back4:
+                # 比对相符 → 落库
+                self._verify_back4_pending = False
+                self.contact = {"name": name, "phone": pend_phone,
+                                "relation": relation, "source": source}
+                self.contact["ts"] = now
+                self.contact["confirmed"] = True
+                self.contact["two_way_verified"] = True
+                self.pending = None
+                self._last_nudge_ts = 0.0
+                self.entry_status = {"source": source, "ts": now, "two_way": True}
+                self._save()
+                self._write_to_memory_system()
+                return {"ok": True, "action": "confirmed",
+                        "message": ("核对一致，记好啦——紧急联系人是"
+                                    + relation + name + "，电话"
+                                    + _format_phone(pend_phone)
+                                    + "。真有事您说一声，我马上帮他打。")}
+            else:
+                # 比对不符 → 从头再来
+                self._verify_back4_pending = False
+                self.pending = None
+                self._save()
+                return {"ok": True, "action": "rejected",
+                        "message": "后四位对不上，可能是我听岔了，您从头再报一遍。"}
+
+    # ---- item7: 号码写记忆系统（高优先级条目，B-6 备份范围）----
+    def _write_to_memory_system(self):
+        """号码写入记忆系统（高优先级条目）。号码只存本地、不展示给第三方。"""
+        if self.memory_system is None or not self.contact:
+            return
+        try:
+            fact_text = (f"紧急联系人：{self.contact.get('relation', '')}"
+                         f"{self.contact.get('name', '')} "
+                         f"{self.contact.get('phone', '')}")
+            if hasattr(self.memory_system, '_add_fact'):
+                self.memory_system._add_fact(fact_text, category="emergency")
+            elif hasattr(self.memory_system, 'add_fact'):
+                self.memory_system.add_fact(fact_text, category="emergency")
+        except Exception:
+            pass  # 写记忆系统失败不影响主流程
 
     # ---- 查询/更正 ----
     def get(self):
@@ -2475,3 +3013,201 @@ class EmergencyContactStore:
                         + _format_phone(c.get("phone", "")) + "。")
             return "您的紧急联系人还没设置呢，您跟我说个名字和电话，我这就记上。"
         return None
+
+
+class EmergencyRescue:
+    """T-5 救命链路控制器（B-11 扩展，item1/2/3/4）：
+    - 触发(item1)：① 语音喊"救命" ② 长时间无活动（白天≥4h/夜间≥10h 两档；
+      基线期前2周宽松阈值白天≥8h 只触发人工确认"您还好吗"，只不触发正式告警）
+    - AI确认(item2)：含无应答分支（60s超时追问1次仍无→直接进倒计时，不等）
+    - 倒计时(item3)：30s 可取消（老人说"别打了/不用了"→取消+记录）
+    - 路径(item4)：喊"救命"=先亲属后120；喊"打120"=120优先（仍走30s倒计时）；
+      绝不静默（呼叫失败→兜底播报+日志）；全程本地播安抚语音
+    时钟注入可测试；依赖 EmergencyContactStore（号码+呼叫通道）。
+    """
+
+    DAY_THRESHOLD = 4 * 3600          # 白天(8:00-22:00) ≥ 4小时
+    NIGHT_THRESHOLD = 10 * 3600       # 夜间(22:00-8:00) ≥ 10小时
+    BASELINE_DAY_THRESHOLD = 8 * 3600  # 基线期白天宽松阈值 ≥ 8小时
+    BASELINE_PERIOD = 14 * 24 * 3600   # 基线期：首次激活后前2周
+
+    CONFIRM_TIMEOUT = 60              # AI确认 60s 无应答
+    CONFIRM_RETRIES = 1               # 追问 1 次
+    COUNTDOWN = 30                    # 30 秒可取消倒计时
+
+    def __init__(self, store, clock=_time.time, activation_ts=None):
+        self.store = store
+        self.clock = clock
+        self.activation_ts = activation_ts if activation_ts is not None else clock()
+        self._last_activity_ts = clock()
+        self.state = "idle"  # idle/confirming/countdown/calling/done/cancelled
+        self._state_ts = clock()
+        self._log = []
+        self._confirm_attempts = 0
+        self._path = None
+        self._countdown_reason = None
+
+    def is_baseline(self, now=None):
+        """基线期判定：首次激活后前2周。"""
+        now = now or self.clock()
+        return (now - self.activation_ts) < self.BASELINE_PERIOD
+
+    def record_activity(self, now=None):
+        """记录活动（H-2帧画面内有人）→ 重置无活动计时。"""
+        now = now or self.clock()
+        self._last_activity_ts = now
+        return None
+
+    def check_no_activity(self, now=None):
+        """检查无活动超时（驱动线程定期调，item1）。
+        白天(8:00-22:00)≥4h / 夜间(22:00-8:00)≥10h；
+        基线期白天≥8h 只触发人工确认（不触发正式告警）。
+        返回触发事件 dict 或 None。"""
+        now = now or self.clock()
+        if self.state != "idle":
+            return None
+        idle_secs = now - self._last_activity_ts
+        hour = _time.localtime(now).tm_hour
+        is_day = 8 <= hour < 22
+        if self.is_baseline(now):
+            # 基线期：宽松阈值（白天≥8h 只触发人工确认，夜间不触发）
+            if is_day and idle_secs >= self.BASELINE_DAY_THRESHOLD:
+                self._last_activity_ts = now
+                self._log_event("baseline_nudge", idle_secs=idle_secs)
+                return {"type": "baseline_nudge",
+                        "message": "您还好吗？我在呢。"}
+            return None
+        # 正式期：两档阈值
+        threshold = self.DAY_THRESHOLD if is_day else self.NIGHT_THRESHOLD
+        if idle_secs >= threshold:
+            self.state = "confirming"
+            self._state_ts = now
+            self._confirm_attempts = 0
+            self._log_event("no_activity_trigger", is_day=is_day, idle_secs=idle_secs)
+            return {"type": "ai_confirm",
+                    "message": "您是不是遇到事儿啦？没事吧？"}
+        return None
+
+    def handle_confirm_reply(self, reply_text, now=None):
+        """AI确认答复（item2，含无应答分支）。
+        ① 应答"没事"=误报归档→idle
+        ② 应答"我要帮忙"/确认异常→进倒计时
+        ③ 无应答(60s超时、追问1次仍无)→直接进倒计时"""
+        now = now or self.clock()
+        if self.state != "confirming":
+            return None
+        t = str(reply_text or "").strip()
+        if not t:
+            # 无应答
+            elapsed = now - self._state_ts
+            if elapsed >= self.CONFIRM_TIMEOUT:
+                if self._confirm_attempts < self.CONFIRM_RETRIES:
+                    self._confirm_attempts += 1
+                    self._state_ts = now
+                    self._log_event("confirm_timeout_retry")
+                    return {"action": "retry",
+                            "message": "您还好吗？我担心您，说句话。"}
+                else:
+                    self._start_countdown(now, reason="no_response")
+                    return {"action": "countdown",
+                            "message": "您没回应，我这就帮您联系家人，"
+                                       "30秒内说'别打了'可以取消。"}
+            return None
+        # 有应答
+        if re.search(r"没事|不用|安好|挺好|我没事|没事儿|好好的|都好", t):
+            self.state = "idle"
+            self._last_activity_ts = now
+            self._log_event("confirm_dismissed")
+            return {"action": "dismissed", "message": "好的，您有事随时喊我。"}
+        else:
+            # 确认异常（"我要帮忙"/非"没事"应答）→ 进倒计时
+            self._start_countdown(now, reason="confirmed")
+            return {"action": "countdown",
+                    "message": "我这就帮您联系家人，30秒内说'别打了'可以取消。"}
+
+    def _start_countdown(self, now, reason):
+        """启动30s可取消倒计时（item3）。"""
+        self.state = "countdown"
+        self._state_ts = now
+        self._countdown_reason = reason
+        self._log_event("countdown_start", reason=reason)
+
+    def handle_countdown_reply(self, reply_text, now=None):
+        """倒计时期间答复（item3，可取消）。
+        老人说"别打了/不用了"→取消+记录；否则等超时执行呼叫。"""
+        now = now or self.clock()
+        if self.state != "countdown":
+            return None
+        t = str(reply_text or "").strip()
+        if re.search(r"别打了|不用了|取消|算了|别叫|停下|不用", t):
+            self.state = "cancelled"
+            self._log_event("countdown_cancelled")
+            return {"action": "cancelled", "message": "好，我不打了。您有事随时喊我。"}
+        # 倒计时未取消，检查是否超时
+        if now - self._state_ts >= self.COUNTDOWN:
+            return self._execute_call(now)
+        return None
+
+    def trigger_rescue(self, trigger_word="救命", now=None):
+        """语音喊"救命"/"打120" 触发（item4 路径决定）。
+        喊"救命"=先亲属后120；喊"打120"=120优先（仍走30s倒计时）。"""
+        now = now or self.clock()
+        self._last_activity_ts = now
+        if re.search(r"120|一二零", str(trigger_word or "")):
+            self._path = "120_first"
+        else:
+            self._path = "contact_first"
+        self.state = "countdown"
+        self._state_ts = now
+        self._countdown_reason = "rescue_word"
+        self._log_event("rescue_trigger", word=str(trigger_word or ""), path=self._path)
+        return {"action": "countdown", "path": self._path,
+                "message": "我这就帮您联系，30秒内说'别打了'可以取消。"}
+
+    def _execute_call(self, now):
+        """执行呼叫（item4：路径决定+绝不静默）。
+        120优先：大屏大字显示"120"+语音引导手动拨（MVP不自主拨）。
+        先亲属后120：先呼登记亲属→无应答(重试1次)→仍无应答→120兜底。"""
+        self.state = "calling"
+        if self._path == "120_first":
+            result = self.store.request_call(target="120", now=now)
+            self.state = "done"
+            self._log_event("call_120", status=result.get("status"))
+            return result
+        # 先亲属后120
+        contact = self.store.get()
+        if not contact:
+            result = self.store.request_call(target="120", now=now)
+            self.state = "done"
+            self._log_event("call_fallback_120_no_contact")
+            return result
+        result = self.store.request_call(target="contact", now=now)
+        if result.get("ok"):
+            self.state = "done"
+            self._log_event("call_contact_ok")
+            return result
+        # 亲属无应答 → 120 兜底
+        result = self.store.request_call(target="120", now=now)
+        self.state = "done"
+        self._log_event("call_fallback_120")
+        return result
+
+    def _log_event(self, event, **kwargs):
+        """记录事件（绝不静默，item4）。"""
+        entry = {"ts": self.clock(), "event": event}
+        entry.update(kwargs)
+        self._log.append(entry)
+        if len(self._log) > 100:
+            self._log = self._log[-100:]
+
+    def status(self, now=None):
+        """状态总览（供前端轮询/API 查询）。"""
+        now = now or self.clock()
+        return {
+            "state": self.state,
+            "is_baseline": self.is_baseline(now),
+            "last_activity_ts": self._last_activity_ts,
+            "idle_secs": now - self._last_activity_ts,
+            "path": self._path,
+            "log": self._log[-10:],
+        }

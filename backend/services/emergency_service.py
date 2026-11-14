@@ -10,6 +10,8 @@ from backend.core.state import engine
 # 依赖/微信窗口缺失时 wechat_voice_call 返回 False，store 层诚实降级兜底话术。
 from backend.services.wechat_caller import wechat_voice_call as _CALLER
 
+import time
+
 
 def _store():
     return engine.emergency_contact_store
@@ -46,3 +48,29 @@ def chat(text):
     """口语闭环（与 app.chat_response 走同一个 store；供前端兜底调用）。"""
     return _store().handle_chat(
         str(text or ""), engine.user_memory.get("call_name", "奶奶"))
+
+
+# ---- T-5 救命链路（item1-4：触发/AI确认/倒计时/路径决定）----
+
+def _rescue():
+    return engine.rescue_controller
+
+
+def rescue_status():
+    """救命链路状态总览（state/is_baseline/idle_secs/path/log）。"""
+    return _rescue().status()
+
+
+def rescue_trigger(word="救命"):
+    """喊'救命'/'打120' 触发（item4 路径决定 + 30s可取消倒计时）。"""
+    return _rescue().trigger_rescue(str(word or "救命"), now=time.time())
+
+
+def rescue_confirm_reply(reply_text):
+    """AI确认答复（item2，含无应答分支：60s超时追问1次仍无→直接进倒计时）。"""
+    return _rescue().handle_confirm_reply(str(reply_text or ""), now=time.time())
+
+
+def rescue_countdown_reply(reply_text):
+    """倒计时期间答复（item3，可取消：'别打了/不用了'→取消+记录）。"""
+    return _rescue().handle_countdown_reply(str(reply_text or ""), now=time.time())

@@ -6,7 +6,18 @@
         <span class="call-title">和小忆视频</span>
         <span class="call-timer" aria-live="off">{{ durationText }}</span>
       </div>
-      <p class="call-privacy">通话不会录下来，说完就忘掉</p>
+      <div class="head-right">
+        <button
+          class="vision-toggle"
+          type="button"
+          :class="{ on: visionOn, degraded: visionOn && visionState === 'degraded' }"
+          :disabled="!!cameraError"
+          @click="toggleVision"
+        >
+          {{ visionToggleText }}
+        </button>
+        <p class="call-privacy">{{ privacyText }}</p>
+      </div>
     </header>
 
     <main class="call-stage">
@@ -50,6 +61,9 @@
         </div>
 
         <p class="local-tag">这是您</p>
+        <span v-if="visionStatusText" class="vision-tag" :class="{ degraded: visionState === 'degraded' }">
+          {{ visionStatusText }}
+        </span>
       </section>
     </main>
 
@@ -63,10 +77,19 @@
         class="btn talk-btn"
         :class="recording ? 'btn-success talking' : 'btn-primary'"
         type="button"
-        :disabled="busy || hangingUp"
-        @click="toggleTalk"
+        :disabled="hangingUp"
+        @click="onMainButton"
       >
-        {{ recording ? '说完了' : busy ? '小忆在想…' : '点我说话' }}
+        {{ mainButtonLabel }}
+      </button>
+
+      <button
+        class="btn auto-toggle"
+        type="button"
+        :disabled="hangingUp"
+        @click="toggleAutoMode"
+      >
+        {{ autoMode ? '⏸ 改手动' : '⚡ 自动' }}
       </button>
 
       <button
@@ -127,6 +150,133 @@ let audioEl = null
 let tickTimer = null
 let hungUp = false
 
+// H-12 通话识别：默认【一直开着、持续看】（用户 2026-11-12 要求：持续检测，别纠结隐私）。
+// YOLO（本地，快）每 2.5s 看一次"人在不在/手里拿啥"；VLM（qwen3-vl-plus）每 8s
+// 描述一次"画面里有什么"。看到的都喂给对话，让"小忆"只说真正看到的、不凭空猜。
+// 帧只在内存里识别、不写画像、不落盘（通话"说完就忘掉"）。
+const visionOn = ref(false)      // 摄像头一打开就自动置 true
+const visionState = ref('off')   // off | watching | busy | degraded
+const lastObs = ref(null)        // YOLO 结构化结论
+const lastScene = ref('')        // VLM 场景描述（"画面里有…"）
+let observeTimer = null
+let sceneTimer = null
+let observing = false
+let scening = false
+
+const OBSERVE_MS = 2500   // YOLO 快，2.5s 一次
+const SCENE_MS = 8000     // VLM 走大模型，8s 一次
+
+const visionToggleText = computed(() => (visionOn.value ? '👀 小忆在看（点我关）' : '👁 让小忆看'))
+const privacyText = computed(() => '画面只用来当下看一眼，不留存')
+const visionStatusText = computed(() => {
+  if (!visionOn.value) return ''
+  if (lastScene.value) return lastScene.value
+  if (visionState.value === 'degraded') return '画面这边看不清，先用声音聊'
+  const o = lastObs.value
+  if (!o) return '小忆在看…'
+  if (o.hand_object) return `小忆看到您手里有「${o.hand_object}」`
+  if (!o.person_present) return '画面里暂时没有您'
+  return '小忆在看您'
+})
+
+function captureFrameB64() {
+  const v = videoEl.value
+  if (!v || !v.videoWidth || !mediaStream) return ''
+  try {
+    const c = document.createElement('canvas')
+    c.width = v.videoWidth
+    c.height = v.videoHeight
+    c.getContext('2d').drawImage(v, 0, 0, c.width, c.height)
+    return c.toDataURL('image/jpeg', 0.6).split(',')[1] || ''
+  } catch (e) {
+    return ''
+  }
+}
+
+async function observeOnce() {
+  if (observing) return
+  const b64 = captureFrameB64()
+  if (!b64) return
+  observing = true
+  visionState.value = 'busy'
+  try {
+    const res = await api.callObserve({ frame_b64: b64, call_id: callId.value, scene: '' })
+    const d = res.data || {}
+    if (d.ok) {
+      lastObs.value = d
+      visionState.value = 'watching'
+    } else {
+      visionState.value = 'degraded'
+    }
+  } catch (e) {
+    visionState.value = 'degraded'
+  } finally {
+    observing = false
+  }
+}
+
+// VLM 场景描述：把"画面里有什么"用一两句话说清（识别眼镜/药/杯子这类 YOLO 看不到的东西）
+async function sceneOnce() {
+  if (scening) return
+  const b64 = captureFrameB64()
+  if (!b64) return
+  scening = true
+  try {
+    const res = await api.callScene({ frame_b64: b64, call_id: callId.value, scene: '' })
+    const d = res.data || {}
+    if (d.ok && d.scene) {
+      lastScene.value = d.scene
+    }
+  } catch (e) {
+    /* VLM 失败就用 YOLO 的结论，不打断通话 */
+  } finally {
+    scening = false
+  }
+}
+
+function startVision() {
+  if (cameraError.value) return
+  visionOn.value = true
+  visionState.value = 'watching'
+  observeOnce()
+  sceneOnce()
+  if (observeTimer) clearInterval(observeTimer)
+  observeTimer = setInterval(observeOnce, OBSERVE_MS)
+  if (sceneTimer) clearInterval(sceneTimer)
+  sceneTimer = setInterval(sceneOnce, SCENE_MS)
+}
+
+function stopVision() {
+  if (observeTimer) { clearInterval(observeTimer); observeTimer = null }
+  if (sceneTimer) { clearInterval(sceneTimer); sceneTimer = null }
+  visionOn.value = false
+  lastObs.value = null
+  lastScene.value = ''
+  if (visionState.value !== 'off') visionState.value = 'off'
+  api.callVisionEnd(callId.value).catch(() => {})
+}
+
+function toggleVision() {
+  if (visionOn.value) stopVision()
+  else startVision()
+}
+
+// 把"看到的"喂给对话：YOLO（人在不在/手里拿啥）+ VLM（画面有什么）合成一段上下文，
+// 并叮嘱小忆"只说看到的、别编"——这样它就不会"识别不出还乱说"。
+function obsContext() {
+  if (!visionOn.value) return ''
+  const bits = []
+  const o = lastObs.value
+  if (o) {
+    if (o.person_present) bits.push('画面里有您（老人本人）')
+    else bits.push('画面里暂时没看到您本人')
+    if (o.hand_object) bits.push(`您手里拿着「${o.hand_object}」`)
+  }
+  if (lastScene.value) bits.push(`画面里看到：${lastScene.value}`)
+  if (!bits.length) return ''
+  return `【小忆此刻看到】${bits.join('；')}。请只根据这些真实看到的内容回应，没看到的别说、别编造。\n`
+}
+
 // 语音挂断关键词：老人不会去点按钮，说一句就得挂
 const HANGUP_WORDS = ['挂断', '挂了', '不说了', '不聊了', '再见', '拜拜', '结束通话']
 
@@ -164,6 +314,7 @@ async function openCamera() {
     if (videoEl.value) {
       videoEl.value.srcObject = mediaStream
     }
+    startVision()   // 摄像头一就绪就持续看（默认开、一直检测，用户 2026-11-12 要求）
   } catch (e) {
     // 老人常见情况：没授权/被占用/没有摄像头。降级为语音通话，不拦着用
     if (e && (e.name === 'NotAllowedError' || e.name === 'PermissionDeniedError')) {
@@ -217,60 +368,31 @@ function isHangupIntent(text) {
   return HANGUP_WORDS.some((w) => text.includes(w))
 }
 
-async function toggleTalk() {
-  if (hangingUp.value) return
+// ---------- 连续对话（默认自动、不按键）+ 手动兜底 ----------
+// autoMode（默认开）：VAD 监听麦克风电平，"开口→停顿 0.9s" 就自动发送；
+// 点"改手动"就回到原来那套"按一下说话、说完了"。两套共用同一套 ASR→对话→播放。
+const autoMode = ref(true)
 
-  // 正在录 → 结束并识别
-  if (recording.value) {
-    recording.value = false
-    busy.value = true
-    error.value = ''
-    try {
-      const audioBase64 = await recorder.stop()
-      const asrRes = await api.asr({ audio_base64: audioBase64 })
-      const text = (asrRes.data.text || '').trim()
-
-      if (!text) {
-        error.value = '没听清，您再说一遍。'
-        caption.value = ''
-        busy.value = false
-        return
-      }
-
-      // 语音挂断：先挂断，不送进对话（避免"再见"被小忆当成一句闲聊）
-      if (isHangupIntent(text)) {
-        caption.value = text
-        hangUp('voice')
-        return
-      }
-
-      caption.value = text
-      const res = await api.chat({
-        user_input: text,
-        chat_history: session.chatHistory || [],
-        surname: session.surname,
-        gender: session.gender,
-        is_muted: session.isMuted,
-        personality: session.personality,
-        conv_id: session.convId,
-      })
-      const d = res.data
-      if (d.conv_id) session.setConversation(d.conv_id, d.chat_history || [])
-      const lastBot = (d.chat_history || []).filter((m) => m.role === 'assistant').pop()
-      playReply(d.audio_url, (lastBot && lastBot.content) || d.reply || '')
-    } catch (e) {
-      console.error(e)
-      error.value = '没听清，您再说一遍。'
-    } finally {
-      busy.value = false
-    }
-    return
+const mainButtonLabel = computed(() => {
+  if (autoMode.value) {
+    if (recording.value) return '在听您说…'
+    if (busy.value) return '小忆在想…'
+    return '自动聆听中'
   }
+  if (recording.value) return '说完了'
+  if (busy.value) return '小忆在想…'
+  return '点我说话'
+})
 
-  // 没在录 → 开始录
+// 主按钮：自动模式下点它 = 切手动（老人想手动就切过去）；手动模式 = 按一下说话
+function onMainButton() {
+  if (autoMode.value) toggleAutoMode()
+  else toggleTalk()
+}
+
+// ---- 录音/发送核心（自动 & 手动共用）----
+async function startRecording() {
   error.value = ''
-  caption.value = ''
-  stopAudio()
   try {
     recorder = recorder || createRecorder()
     await recorder.start()
@@ -279,6 +401,167 @@ async function toggleTalk() {
     console.error(e)
     error.value = '麦克风打不开，您看看是不是没插好。'
   }
+}
+
+async function finishAndSend() {
+  // 停录音 → ASR →（挂断检查）→ 对话 → 播放
+  if (!recorder) return
+  recording.value = false
+  busy.value = true
+  error.value = ''
+  try {
+    const audioBase64 = await recorder.stop()
+    const asrRes = await api.asr({ audio_base64: audioBase64 })
+    const text = (asrRes.data.text || '').trim()
+
+    if (!text) {
+      error.value = '没听清，您再说一遍。'
+      caption.value = ''
+      return
+    }
+
+    // 语音挂断：先挂断，不送进对话（避免"再见"被小忆当成一句闲聊）
+    if (isHangupIntent(text)) {
+      caption.value = text
+      hangUp('voice')
+      return
+    }
+
+    caption.value = text
+    const res = await api.chat({
+      user_input: obsContext() + text,
+      chat_history: session.chatHistory || [],
+      surname: session.surname,
+      gender: session.gender,
+      is_muted: session.isMuted,
+      personality: session.personality,
+      conv_id: session.convId,
+    })
+    const d = res.data
+    if (d.conv_id) session.setConversation(d.conv_id, d.chat_history || [])
+    const lastBot = (d.chat_history || []).filter((m) => m.role === 'assistant').pop()
+    playReply(d.audio_url, (lastBot && lastBot.content) || d.reply || '')
+  } catch (e) {
+    console.error(e)
+    error.value = '没听清，您再说一遍。'
+  } finally {
+    busy.value = false
+  }
+}
+
+// 自动模式：检测到"说完了"就发；发完重新起录音，接着听下一句
+async function autoSend() {
+  await finishAndSend()
+  if (autoMode.value && !hangingUp.value) {
+    try { await startRecording() } catch (e) { /* 忽略 */ }
+  }
+}
+
+// 手动模式："按一下说话 / 说完了"
+function toggleTalk() {
+  if (hangingUp.value) return
+  if (recording.value) {
+    finishAndSend()
+  } else {
+    stopAudio()
+    startRecording()
+  }
+}
+
+// ---------- VAD：说话→停顿 自动发送（连续对话的核心） ----------
+let vadStream = null
+let vadCtx = null
+let vadAnalyser = null
+let vadTimer = null
+let silenceSince = 0
+let wasSpeaking = false
+const VAD_THRESHOLD = 0.012   // RMS 超过它算"在说话"
+const VAD_SILENCE_MS = 900    // 停顿这么久算"说完了"
+
+function rmsLevel() {
+  if (!vadAnalyser) return 0
+  const data = new Uint8Array(vadAnalyser.fftSize)
+  vadAnalyser.getByteTimeDomainData(data)
+  let sum = 0
+  for (let i = 0; i < data.length; i++) {
+    const v = (data[i] - 128) / 128
+    sum += v * v
+  }
+  return Math.sqrt(sum / data.length)
+}
+
+async function startVad() {
+  try {
+    vadStream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    vadCtx = new (window.AudioContext || window.webkitAudioContext)()
+    const src = vadCtx.createMediaStreamSource(vadStream)
+    vadAnalyser = vadCtx.createAnalyser()
+    vadAnalyser.fftSize = 512
+    src.connect(vadAnalyser)
+  } catch (e) {
+    // VAD 起不来（没麦克风/被占用）：退回手动，别把整通电话卡死
+    console.error(e)
+    autoMode.value = false
+    return
+  }
+  if (vadTimer) clearInterval(vadTimer)
+  vadTimer = setInterval(vadTick, 120)
+  await startRecording()   // 自动模式一进去就先起一路录音，等着接话
+}
+
+function vadTick() {
+  if (!autoMode.value || busy.value || speaking.value || hangingUp.value) return
+  const level = rmsLevel()
+  const now = Date.now()
+  if (level > VAD_THRESHOLD) {
+    wasSpeaking = true
+    silenceSince = 0
+    if (!recording.value) {
+      startRecording()   // 老人开口了、还没在录 → 起录音把这段话接住
+    }
+  } else if (wasSpeaking) {
+    if (!silenceSince) silenceSince = now
+    if (now - silenceSince >= VAD_SILENCE_MS) {
+      wasSpeaking = false
+      silenceSince = 0
+      autoSend()
+    }
+  }
+}
+
+function stopVad() {
+  if (vadTimer) { clearInterval(vadTimer); vadTimer = null }
+  if (vadStream) { vadStream.getTracks().forEach((t) => t.stop()); vadStream = null }
+  if (vadCtx) { vadCtx.close().catch(() => {}); vadCtx = null }
+  vadAnalyser = null
+  wasSpeaking = false
+  silenceSince = 0
+}
+
+function toggleAutoMode() {
+  if (hangingUp.value) return
+  if (autoMode.value) {
+    autoMode.value = false        // 自动 → 手动
+    stopVad()
+    if (recording.value) { recording.value = false; try { recorder && recorder.cancel() } catch (e) {} }
+  } else {
+    autoMode.value = true         // 手动 → 自动
+    startVad()
+  }
+}
+
+// ---------- 主动关怀：通话里也轮询（每 30s），"每分钟主动一次"在这里出声 ----------
+let proactiveTimer = null
+async function pollProactive() {
+  if (!session.convId || busy.value || speaking.value || hangingUp.value) return
+  try {
+    const res = await api.proactive({ is_muted: session.isMuted, conv_id: session.convId })
+    const d = res.data
+    if (d && d.triggered) {
+      const lastBot = (d.chat_history || []).filter((m) => m.role === 'assistant').pop()
+      playReply(d.audio_url, (lastBot && lastBot.content) || d.reply || '')
+    }
+  } catch (e) { /* 静默，下轮再试 */ }
 }
 
 // ---------- 挂断 ----------
@@ -292,8 +575,11 @@ function hangUp(reason) {
     try { recorder && recorder.cancel() } catch (e) { /* 忽略 */ }
   }
   stopAudio()
+  stopVad()                   // 停 VAD 连续对话
+  stopVision()                // 停画面识别 + 清后端内存态
   closeCamera()               // 关键：真正停摄像头
   if (tickTimer) clearInterval(tickTimer)
+  if (proactiveTimer) { clearInterval(proactiveTimer); proactiveTimer = null }
 
   // 通话本身不写记忆：这里只在本页内存里收个尾，不落盘、不发后端
   const summary = { call_id: callId.value, seconds: seconds.value, ended_by: reason }
@@ -310,16 +596,25 @@ onMounted(() => {
   callId.value = `call_${Date.now().toString(36)}`
   openCamera()
   tickTimer = setInterval(() => { seconds.value += 1 }, 1000)
+  startVad()   // 连续对话：默认自动监听（VAD 起不来会自动退回手动）
+  // 主动关怀：通话里也轮询，"每分钟主动一次"在这里出声
+  if (session.convId) {
+    pollProactive()
+    proactiveTimer = setInterval(pollProactive, 30000)
+  }
 })
 
 onBeforeUnmount(() => {
-  // 兜底：直接关页面/切路由也必须放掉摄像头
+  // 兜底：直接关页面/切路由也必须放掉摄像头 + 停 VAD + 停主动轮询
   if (!hungUp) {
     if (recording.value) { try { recorder && recorder.cancel() } catch (e) { /* 忽略 */ } }
     stopAudio()
+    stopVad()
+    stopVision()
     closeCamera()
   }
   if (tickTimer) clearInterval(tickTimer)
+  if (proactiveTimer) { clearInterval(proactiveTimer); proactiveTimer = null }
 })
 </script>
 
@@ -359,6 +654,52 @@ onBeforeUnmount(() => {
   margin: 0;
   font-size: var(--font-small);
   color: var(--color-accent2-deep);   /* 深青绿：这是"让您放心"的信息，不是警告 */
+}
+.head-right {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+}
+.vision-toggle {
+  min-height: 44px;
+  padding: 0 18px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 2px solid var(--color-border);
+  border-radius: 22px;
+  cursor: pointer;
+}
+.vision-toggle:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.vision-toggle.on {
+  color: #FFFFFF;
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+.vision-toggle.degraded {
+  color: var(--color-text-sub);
+  background: var(--color-surface);
+  border-color: var(--color-border);
+}
+.vision-tag {
+  position: absolute;
+  right: 12px;
+  bottom: 10px;
+  margin: 0;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: var(--font-small);
+  font-weight: 700;
+  color: #FFF8ED;
+  background: rgba(62, 130, 95, 0.82);
+}
+.vision-tag.degraded {
+  background: rgba(140, 120, 100, 0.82);
 }
 
 /* ---------- 主画面：左右两栏，窄屏自动上下 ---------- */
@@ -543,5 +884,14 @@ onBeforeUnmount(() => {
   flex: 1;
   min-height: 64px;
   font-size: 20px;
+}
+.auto-toggle {
+  flex: 1;
+  min-height: 64px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-accent2-deep);
+  background: var(--color-surface-soft);
+  border: 2px solid var(--color-accent);
 }
 </style>

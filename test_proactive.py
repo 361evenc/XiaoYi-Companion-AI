@@ -20,6 +20,11 @@ def _ts(y=2026, mo=10, d=4, h=12, mi=0, s=0):
 
 class ProactiveTestBase(unittest.TestCase):
     def setUp(self):
+        # 这些用例测的是"复杂信号"那套逻辑；简单周期模式（SIMPLE_PERIODIC，
+        # 用户 2026-11-11 要求的"每分钟主动一次"）会短路掉信号/冷却/上限，
+        # 先把开关关掉再测这套逻辑，跑完还原——简单模式本身有独立用例。
+        self._saved_simple = proactive.SIMPLE_PERIODIC
+        proactive.SIMPLE_PERIODIC = False
         # init 覆盖全局 _P 前先快照，tearDown 还原（见 tearDown 注释）
         self._saved_p = dict(proactive._P)
         self.tmp = tempfile.mkdtemp(prefix="pro_test_")
@@ -56,6 +61,7 @@ class ProactiveTestBase(unittest.TestCase):
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
+        proactive.SIMPLE_PERIODIC = self._saved_simple
         # 防跨套件污染：setUp 的 proactive.init 会覆盖全局 _P，跑完必须还原，
         # 否则组合跑（本套件在 test_bug_fixes_app 之前执行）时 _P 里残留
         # 本测试实例的闭包，bugfixes 的主动关怀用例读到空事件全部静默
@@ -335,6 +341,33 @@ class TestGeneration(ProactiveTestBase):
         self.assertEqual(s["fired_total"], 1)
         self.assertEqual(s["accepted"], 1)
         self.assertEqual(s["acceptance_rate"], 1.0)
+
+
+# ----------------------------------------------------------------
+# SIMPLE_PERIODIC 每分钟模式（用户 2026-11-11 要求：不走复杂信号，空闲每分钟主动一次）
+# ProactiveTestBase.setUp 默认关掉 SIMPLE_PERIODIC（让上面的复杂信号用例能跑），
+# 这里在 super().setUp() 后重新打开，专门测新行为。
+class TestSimplePeriodic(ProactiveTestBase):
+    def setUp(self):
+        super().setUp()
+        proactive.SIMPLE_PERIODIC = True   # 打开简单周期模式
+
+    def test_idle_over_60s_fires(self):
+        """空闲超过 60s（且距上次主动够久）→ 主动一句轮转关怀语"""
+        self.last_user[0] = self._now - 120
+        msg = proactive.tick(self._now)
+        self.assertIsNotNone(msg, "空闲超过 60s 必须主动一句")
+
+    def test_active_no_interruption(self):
+        """用户刚说过话（< 60s）→ 不打断"""
+        self.last_user[0] = self._now - 30
+        self.assertIsNone(proactive.tick(self._now), "用户刚说过话（<60s）不能打断")
+
+    def test_quiet_hours_none(self):
+        """深夜（22-8 免打扰）→ 不主动"""
+        quiet = _ts(h=23, mi=0)
+        self.last_user[0] = quiet - 120
+        self.assertIsNone(proactive.tick(quiet), "深夜（22-8）免打扰，不主动")
 
 
 if __name__ == "__main__":

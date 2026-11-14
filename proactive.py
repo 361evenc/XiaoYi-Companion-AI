@@ -35,6 +35,7 @@ from datetime import datetime
 # ---------------------------------------------------------------- 可调参数
 
 SILENCE_THRESHOLD = 300        # 信号1：沉默多久算"太久"（秒）
+CHECKIN_SILENCE = 4 * 3600     # 温和定期问候：好一阵没聊（半天级）就主动问一句"今天怎么样"（秒）
 EMO_SILENCE_THRESHOLD = 180    # 信号4：负面情绪后沉默多久主动关心（秒）
 FOLLOWUP_MIN_AGE = 60          # 健康/情绪事件说完多久后跟进（秒，承继旧版）
 TODO_STALE_AGE = 1800          # 提醒触发后多久仍未确认，算作"有事没做完"（秒）
@@ -44,6 +45,18 @@ FEEDBACK_WINDOW = 60           # 主动开口后观察用户反应的窗口（�
 BASE_COOLDOWN = 1800           # 基础冷却 30 分钟（理念文档）
 QUIET_START, QUIET_END = 22, 8  # 免打扰时段 22:00–08:00（紧急提醒由 reminder.py 直走，不经本引擎）
 DAILY_CAP = 8                  # 每日主动开口硬上限
+
+# ========== 简单周期性主动（用户 2026-11-11 要求："先不走复杂理念，每分钟主动一次"） ==========
+SIMPLE_PERIODIC = True         # 开启后：只要老人空闲（距上次说话 >= USER_ACTIVE_GAP），每 60s 主动开口一次
+PERIODIC_INTERVAL = 60         # 周期性主动的最小间隔（秒）
+# 周期性主动的话术池（轮着来，带出已记住的话题，避免"复读机"感）
+_PERIODIC_TOPICS = [
+    ("today", "今天过得怎么样呀？"),
+    ("food", "这会儿想吃点啥不？"),
+    ("rest", "坐累了吧，要不要歇一歇、喝口水？"),
+    ("memory", "我想起您之前跟我聊的那些事儿了，您还想再唠唠不？"),
+    ("health", "今天身体没啥不舒服的吧？"),
+]
 
 K_MIN, K_MAX = 0.5, 2.0        # 冷却个性化系数 k 的上下限
 THRESH_DEFAULT = 3.0           # 动机阈值（平时）
@@ -357,6 +370,18 @@ def _sig_silence(now):
     return []
 
 
+def _sig_checkin(now):
+    """温和定期问候（P4）：好一阵没聊（半天级），主动问一句"今天怎么样"。
+    不依赖画像（画像空也能开口）；每天最多一次（topic_key 按天去重）。"""
+    last_user = float(_prov("last_interaction", now) or now)
+    if now - last_user < CHECKIN_SILENCE:
+        return []
+    return [{"signal": "checkin", "priority": "P4", "topic_type": "checkin",
+             "evidence": {"source": "silence", "text": "好一阵没和老人聊天了，主动问候一下"},
+             "scene": {"kind": "checkin"},
+             "topic_key": f"checkin:{_day_key(now)}"}]
+
+
 def _festival_name(now, st):
     """今日节日：内置阳历 + festival_dates.json（按 MM-DD 匹配，每年维护）。"""
     md = datetime.fromtimestamp(now).strftime("%m-%d")
@@ -463,6 +488,7 @@ def _scene_desc(cand):
         "festival": f"今天是{s.get('festival', '')}，主动问候，陪老人说说话",
         "birthday": ("今天是老人的生日，送上祝福" if s.get("is_birthday") else f"今天是个日子：{s.get('text', '')}，主动提起"),
         "weather_care": f"{s.get('weather_desc', '天气变了')}" + (f"，老人有「{s.get('health_hint')}」的老毛病，针对性叮嘱" if s.get("health_hint") else "，提醒老人注意添衣"),
+        "checkin": "好一阵没和老人聊天了，主动温和地问候一句今天过得怎么样",
     }.get(t, "主动关心老人")
 
 
@@ -505,6 +531,9 @@ def _template_phrase(cand, persona, call):
         if s.get("health_hint"):
             return f"{call}，{s.get('weather_desc', '外边变天了')}，您{s.get('health_hint')}，可得注意着点。"
         return f"{call}，{s.get('weather_desc', '外边变天了')}，出门记得添件衣裳。"
+    if t == "checkin":
+        return (f"{call}，好一阵没跟您唠了，今天过得咋样呀？跟我说说呗。" if not caring else
+                f"{call}，惦记着您呢，今儿都好吧？陪我唠两句？")
     return f"{call}，我在这儿呢，陪您唠两句？"
 
 # ---------------------------------------------------------------- L2 仲裁 + L5 反馈 + 主入口
@@ -562,6 +591,42 @@ def tick(now=None):
         st = _roll_day(_load_state(), now)
         st = _settle_awaiting(st, now)
 
+        # —— 简单模式：只按"每 60s 主动一次"（用户 2026-11-11 要求；守免打扰 + 聊得正欢不插嘴）——
+        # SIMPLE_PERIODIC 开启时不跑下面那套复杂信号/冷却/上限，行为可预期：
+        # 只要老人空闲（距上次说话 >= USER_ACTIVE_GAP）且距上次主动 >= PERIODIC_INTERVAL，就开口一句。
+        if SIMPLE_PERIODIC:
+            if _in_quiet_hours(now):
+                _save_state(st)
+                return None
+            last_user = float(_prov("last_interaction", now) or now)
+            if (now - last_user >= USER_ACTIVE_GAP
+                    and now - st.get("last_proactive_ts", 0.0) >= PERIODIC_INTERVAL):
+                idx = st.get("periodic_idx", 0) % len(_PERIODIC_TOPICS)
+                ttype, line = _PERIODIC_TOPICS[idx]
+                st["periodic_idx"] = st.get("periodic_idx", 0) + 1
+                persona, call = _persona(), _call_name()
+                cand = {"signal": "periodic", "priority": "P3", "topic_type": ttype,
+                        "evidence": {"source": "periodic", "text": line},
+                        "scene": {"kind": "periodic"}, "topic_key": f"periodic:{ttype}:{_day_key(now)}"}
+                msg = _llm_phrase(cand, persona, call) or f"{call}，{line}"
+                if _safety is not None:
+                    try:
+                        r = _safety(msg, persona, call)
+                        if r and not r.get("safe", True):
+                            msg = str(r.get("safe_reply") or msg)
+                    except Exception:
+                        pass
+                log_idx = _append_log({"ts": now, "signal": "periodic", "priority": "P3",
+                    "topic_type": ttype, "evidence": line, "persona": persona, "message": msg,
+                    "motivation": 0.0, "in_cooldown": False, "reaction": None})
+                st["last_proactive_ts"] = now
+                st["fired_today"] += 1
+                st["awaiting_feedback"] = {"ts": now, "log_idx": log_idx, "topic_type": ttype}
+                _save_state(st)
+                return msg
+            _save_state(st)
+            return None
+
         # —— 闸1：硬抑制 ——
         if _in_quiet_hours(now) or now < st.get("quiet_until", 0.0):
             _save_state(st)
@@ -573,7 +638,7 @@ def tick(now=None):
         # —— L1：采集候选 ——
         cands = []
         for fn in (_sig_todo_stale, _sig_health_followup, _sig_emotion,
-                   _sig_anchors, _sig_silence, _sig_env):
+                   _sig_anchors, _sig_silence, _sig_checkin, _sig_env):
             try:
                 cands.extend(fn(now) if fn is not _sig_env else fn(now, st))
             except Exception as e:

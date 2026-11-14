@@ -8,8 +8,8 @@
 覆盖：
   1. 没有分布统计 / 没有 WER → hold，一个方言都不上线（不猜、不硬上）
   2. 上线清单 = 分布 Top3 ∩ WER ≤ 基线×0.8 ∩ 有引擎参数（缺一不上）
-  3. 未上线方言：ASR 过闸门后被拒绝、不调引擎，话术是「我还没学会听X方言，等我学好了」
-  4. 上线方言：只带后端选型给的引擎参数识别（前端/引擎不自己猜）
+  3. 本构建不做分方言 ASR：闸门恒放行，ASR 一律走普通话（hint 恒 None），引擎照调
+  4. 请求的方言如实记录、但只进统计；诊断口径（Top3∩WER∩引擎参数）保留，供日后上真·方言模型用
   5. 声音复刻默认关、没有任何复刻接口（防顺手做）
   6. WER 计算与 Top3 占比口径（dialect_report 的纯函数）
 """
@@ -64,17 +64,18 @@ class DialectGateTest(unittest.TestCase):
 
     # -------------------------------------------------------------- 1
     def test_01_no_data_means_hold(self):
-        """没有任何统计/实测 → hold，普通话照常，任何方言都诚实拒绝。"""
+        """统计没齐全 → 诊断面板 hold；但识别不受影响（本构建一律走普通话）。"""
         cfg = dialect_service.config()
-        self.assertTrue(cfg["hold"], "没有数据必须 hold")
+        self.assertTrue(cfg["hold"], "没有数据必须 hold（诊断口径）")
         self.assertEqual(cfg["online"], [])
         self.assertEqual(cfg["top3"], [])
         self.assertTrue(all(not o["supported"] for o in cfg["options"]))
 
+        # 本构建不做分方言 ASR：闸门恒放行，传任何方言都走普通话、不拒绝
         gate = dialect_service.asr_gate("河南话")
-        self.assertTrue(gate["refused"])
+        self.assertFalse(gate["refused"])
+        self.assertEqual(gate["mode"], "mandarin")
         self.assertEqual(gate["dialect"], "河南方言")
-        self.assertEqual(gate["reply"], "我还没学会听河南方言，等我学好了。")
         self.assertIsNone(gate["hint"])
 
         self.assertFalse(dialect_service.asr_gate("普通话")["refused"],
@@ -105,14 +106,15 @@ class DialectGateTest(unittest.TestCase):
         self.assertIn("WER", by_name["东北方言"]["reason"])
         self.assertIn("引擎参数", by_name["山东方言"]["reason"])
 
+        # 识别一律走普通话（本构建不做分方言）；诊断面板仍正确标出"若上真模型该上哪个"
         gate = dialect_service.asr_gate("河南话")
         self.assertFalse(gate["refused"])
-        self.assertEqual(gate["mode"], "dialect")
+        self.assertEqual(gate["mode"], "mandarin")
         self.assertEqual(gate["dialect"], "河南方言")
 
     # -------------------------------------------------------------- 3
-    def test_03_empty_intersection_holds_and_refuses_honestly(self):
-        """Top3 有、WER 全不达标 → 交集为空 → hold，不硬上。"""
+    def test_03_empty_intersection_holds_in_diagnostics(self):
+        """Top3 有、WER 全不达标 → 诊断面板 hold（不硬上）；识别仍走普通话。"""
         _write(dialect_service.DIST_FILE, _dist([("河南方言", 6), ("东北方言", 4)]))
         _write(dialect_service.EVAL_FILE, _eval([
             {"name": "河南方言", "baseline_wer": 0.20, "wer": 0.21, "corpus_size": 20},
@@ -120,16 +122,17 @@ class DialectGateTest(unittest.TestCase):
              "asr": {"cluster": "TEST_CLUSTER"}},
         ]))
         cfg = dialect_service.config()
-        self.assertTrue(cfg["hold"])
+        self.assertTrue(cfg["hold"], "诊断口径：WER 不达标不硬上")
         self.assertEqual(cfg["online"], [])
 
+        # 识别不受诊断 hold 影响：一律走普通话，不拒绝
         gate = dialect_service.asr_gate("东北方言")
-        self.assertTrue(gate["refused"], "WER 未达标必须拒绝，不能硬上")
-        self.assertEqual(gate["reply"], "我还没学会听东北方言，等我学好了。")
+        self.assertFalse(gate["refused"])
+        self.assertEqual(gate["mode"], "mandarin")
 
     # -------------------------------------------------------------- 4
-    def test_04_asr_refusal_never_calls_engine(self):
-        """拒绝路径不调 ASR 引擎；上线路径只带后端给的 hint。"""
+    def test_04_asr_always_uses_mandarin(self):
+        """本构建不做分方言：不管传什么方言、有没有统计数据，ASR 一律走普通话（hint 恒 None），引擎照调。"""
         class FakeEngine:
             def __init__(self):
                 self.calls = []
@@ -141,13 +144,14 @@ class DialectGateTest(unittest.TestCase):
         voice_service.engine = fake
         audio = base64.b64encode(b"\x00" * 400).decode()
 
-        # 没有数据 → 拒绝，引擎一次都不该被调
+        # 传"河南方言" → 不拒绝，走普通话（hint=None），引擎照调
         res = voice_service.asr(audio, dialect="河南方言")
-        self.assertTrue(res["refused"])
-        self.assertEqual(res["text"], "")
-        self.assertEqual(fake.calls, [], "未上线方言不能送去识别")
+        self.assertFalse(res["refused"])
+        self.assertEqual(res["text"], "识别结果")
+        self.assertEqual(res["dialect"], "河南方言", "请求的方言如实记录")
+        self.assertEqual(fake.calls, [None], "一律普通话识别，不带方言引擎参数")
 
-        # 打开一个上线方言 → 只带后端选型给的参数
+        # 有统计数据也一样：识别仍走普通话（统计只进诊断面板，不影响 ASR）
         _write(dialect_service.DIST_FILE, _dist([("河南方言", 10)]))
         _write(dialect_service.EVAL_FILE, _eval([
             {"name": "河南方言", "baseline_wer": 0.2, "wer": 0.1, "corpus_size": 10,
@@ -156,9 +160,9 @@ class DialectGateTest(unittest.TestCase):
         res = voice_service.asr(audio, dialect="河南方言")
         self.assertFalse(res["refused"])
         self.assertEqual(res["text"], "识别结果")
-        self.assertEqual(fake.calls, [{"cluster": "TEST_CLUSTER", "language": "zh-CN"}])
+        self.assertEqual(fake.calls[-1], None, "统计达标也不带方言参数（本构建只有普通话模型）")
 
-        # 普通话不带 hint（方言参数不能顺手塞给普通话）
+        # 普通话/未指定 → 同样 hint=None
         res = voice_service.asr(audio)
         self.assertEqual(fake.calls[-1], None)
 
@@ -204,8 +208,10 @@ class DialectGateTest(unittest.TestCase):
                          "选了「其他方言」必须写清是哪种")
 
         cfg = dialect_service.config()
-        self.assertTrue(cfg["hold"], "表单填了不等于上线：仍要看分布/WER")
-        self.assertTrue(dialect_service.asr_gate("河南方言")["refused"])
+        self.assertTrue(cfg["hold"], "表单填了不等于上真·方言模型：诊断口径仍要看分布/WER")
+        # 识别一律走普通话（本构建不做分方言）；表单只进统计
+        self.assertFalse(dialect_service.asr_gate("河南方言")["refused"])
+        self.assertEqual(dialect_service.asr_gate("河南方言")["mode"], "mandarin")
 
 
 if __name__ == "__main__":

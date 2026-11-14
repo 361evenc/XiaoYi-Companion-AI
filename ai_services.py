@@ -270,7 +270,7 @@ def build_biography(bank, call_name="奶奶"):
     """把长期记忆整合成一段温暖的小传。优先 DeepSeek 整合，离线按类别拼装。"""
     try:
         snap = bank.profile_snapshot() if bank else {}
-        eps = bank.timeline(20) if bank else []
+        eps = [e for e in (bank.timeline(20) if bank else []) if e.get("long_term") is not False]
         refls = [r["text"] for r in (bank.reflections[:5] if bank else [])]
     except Exception:
         snap, eps, refls = {}, [], []

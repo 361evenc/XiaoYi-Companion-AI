@@ -96,10 +96,10 @@ def setup(surname="", gender="女", personality="踏实务实", is_muted=False):
 
 def photo(photo_base64, mime="image/jpeg", chat_history=None, surname="", gender="女",
           is_muted=False, personality="踏实务实", conv_id=None):
-    """拍照/上传图片：存进记忆箱 → 视觉识别 → 结果注入对话，走正常聊天流程。
+    """拍照/上传图片：先识别 → 静默判断重要性（结合对话）→ 重要的才收进记忆箱 → 结果注入对话。
 
     返回与 chat() 同构的打包（reply/audio_url/conv_id/chat_history/panels）。
-    无 VISION key 时识别降级（识别结果为空，仅存图），回复走兜底话术。
+    无 VISION key 时识别降级（描述为空），判断退化为只看对话上下文；判断不了默认收。
     """
     photo_base64 = (photo_base64 or "").strip()
     user_text = "【我给您看张照片】"
@@ -117,12 +117,15 @@ def photo(photo_base64, mime="image/jpeg", chat_history=None, surname="", gender
                 with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
                     f.write(raw)
                     tmp = f.name
-                saved = engine._save_photo_to_box(tmp)
-                desc = engine.recognize_image(saved or tmp)
+                desc = engine.recognize_image(tmp)
+                # 静默筛选：结合识别 + 最近对话判断"值不值得长期记住"，不打扰、不反问
+                worth = engine.judge_photo_worth(desc, chat_history)
+                if worth:
+                    engine._save_photo_to_box(tmp)
                 if desc:
                     user_text = f"【我给您看张照片：{desc}】"
-                elif saved:
-                    user_text = "【我给您看张照片（已收进记忆箱，内容我暂时认不出来）】"
+                else:
+                    user_text = "【我给您看张照片（内容我暂时认不出来）】"
             finally:
                 if tmp and os.path.exists(tmp):
                     try:

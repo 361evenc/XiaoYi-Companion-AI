@@ -1,53 +1,27 @@
 <template>
-  <section class="vision-card" :class="toneClass" aria-live="polite">
+  <!-- 录制中：醒目卡片（老人要知道"在看"，随时能停） -->
+  <section v-if="isRecording" class="vision-card tone-on" aria-live="polite">
     <div class="vision-main">
       <div class="vision-copy">
-        <p class="vision-title">{{ stateText }}</p>
-        <p class="vision-audio">声音：{{ audioText }}</p>
-        <p class="vision-sub">{{ subText }}</p>
+        <p class="vision-title">小忆在看</p>
+        <p class="vision-sub">小忆在看着客厅，帮您找东西。</p>
       </div>
-
-      <button
-        v-if="canStop"
-        class="btn btn-secondary vision-btn"
-        type="button"
-        :disabled="busy"
-        @click="stop"
-      >
+      <button class="btn btn-secondary vision-btn" type="button" :disabled="busy" @click="stop">
         {{ busy ? '正在停…' : '🛑 别看了' }}
       </button>
-      <button
-        v-else-if="canStart"
-        class="btn btn-primary vision-btn"
-        type="button"
-        :disabled="busy"
-        @click="start"
-      >
-        {{ busy ? '正在开…' : startLabel }}
-      </button>
-      <button v-else class="btn btn-secondary vision-btn" type="button" disabled>
-        {{ busy ? '正在…' : '请稍等' }}
-      </button>
     </div>
-
-    <p v-if="error" class="vision-error">{{ error }}</p>
-
-    <button
-      class="impact-toggle"
-      type="button"
-      :aria-expanded="impactOpen"
-      @click="impactOpen = !impactOpen"
-    >
-      关掉以后，哪些功能会受影响？{{ impactOpen ? '（点我收起）' : '（点我看看）' }}
-    </button>
-
-    <ul v-if="impactOpen" class="impact-list">
-      <li><strong>找物</strong>：只能回答“您上次说放在…”，看不到新位置</li>
-      <li><strong>跌倒告警</strong>：不可用</li>
-      <li><strong>活动水平</strong>：不可用</li>
-      <li><strong>识图</strong>：仍然可用，拍照问小忆不受影响</li>
-    </ul>
   </section>
+
+  <!-- 之前在看、现在停了：一条最小提示 + "再看一眼"入口；不啰嗦、不吓人 -->
+  <div v-else-if="isStoppedWatched" class="vision-quiet tone-quiet-off" role="status" aria-live="polite">
+    <span class="vision-quiet-text">
+      <span class="vision-quiet-ico" aria-hidden="true">📷</span>
+      小忆没在看
+    </span>
+    <button class="btn vision-quiet-btn" type="button" :disabled="busy" @click="start">
+      {{ busy ? '正在开…' : '让小忆看' }}
+    </button>
+  </div>
 
   <!-- 首次激活告知：大字 + 语音，确认后才真正开摄像头 -->
   <Teleport to="body">
@@ -174,6 +148,11 @@ const canStart = computed(() =>
 const startLabel = computed(() =>
   currentState.value === 'fault' || currentState.value === 'unknown' ? '再试一次' : '让小忆看'
 )
+
+// 只有"录制中"才用醒目卡片提醒（随时能停）；"之前看过、现在停了"给一条最小提示能再开；
+// 没接摄像头 / 从没开过（fault / idle / unknown）一律不显示，别拿用不上的东西占地方
+const isRecording = computed(() => currentState.value === 'recording')
+const isStoppedWatched = computed(() => currentState.value === 'released')
 
 function applyStatus(s) {
   if (!s) return
@@ -458,6 +437,65 @@ defineExpose({ stopByVoice })
   min-height: 56px;
   font-size: 20px;
   font-weight: 700;
+}
+
+/* 非录制：顶部一条细提示（替代原来占一大块的状态卡） */
+.vision-quiet {
+  flex-shrink: 0;
+  margin: 8px 20px 0;
+  padding: 6px 10px 6px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 22px;
+  font-size: var(--font-small);
+  color: var(--color-text-sub);
+}
+.vision-quiet.tone-quiet-off {
+  border-color: var(--color-border);
+  background: var(--color-surface);
+}
+.vision-quiet.tone-quiet-warn {
+  border-color: #E4C583;
+  background: #FFFBF0;
+}
+.vision-quiet.tone-quiet-busy {
+  border-color: var(--color-border);
+  background: var(--color-surface-soft);
+}
+.vision-quiet-text {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+.vision-quiet-ico {
+  font-size: 18px;
+  line-height: 1;
+}
+.vision-quiet-btn {
+  flex-shrink: 0;
+  min-width: auto;
+  min-height: 40px;
+  padding: 6px 16px;
+  font-size: var(--font-small);
+  font-weight: 700;
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
+  border-radius: 20px;
+  cursor: pointer;
+}
+.vision-quiet-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.vision-quiet-impact {
+  margin: 2px 20px 0;
 }
 
 .vision-error {

@@ -2,9 +2,9 @@
  * F-8 方言识别 —— 5 条固定检查
  * 运行：cd frontend && node tests/f8_guardrails.mjs
  *
- *   1) 闸门写在后端：Top3 ∩ WER ≤ 基线×0.8 ∩ 引擎参数，交集为空 → hold
- *   2) 听不懂就诚实说：未上线方言不调引擎、不回残文
- *   3) 前端只做体验链路：方言切换 + 拒绝处理，不自己决定上线
+ *   1) 统计口径保留（诊断用）：Top3 ∩ WER ≤ 基线×0.8 ∩ 引擎参数
+ *   2) 本构建不做分方言 ASR：asr_gate 恒放行，一律普通话（覆盖多数口音）
+ *   3) 前端不做方言切换：录音直接按普通话识别，不手动切换、不拒绝
  *   4) 三通道统计齐全才出 Top3：对话日志 / H-5 访谈 / 子女端表单
  *   5) 亲属声音复刻默认关、无接口（本卡不做）
  */
@@ -60,34 +60,29 @@ check(dialectApi.includes('router = APIRouter(prefix="/api/dialect"')
       '/api/dialect 只有配置/采集，没有复刻入口')
 
 // ---------------------------------------------------------------- 2
-section(2, '听不懂就诚实说，不硬上')
-check(service.includes('我还没学会听') && service.includes('等我学好了'),
-      '未上线方言有固定诚实话术')
-check(/gate\.get\("refused"\)/.test(voiceSvc) && voiceSvc.includes('return {"text": ""'),
-      'ASR 拒绝路径返回空文本，不把残文当老人原话')
+section(2, '本构建不做分方言 ASR：闸门恒放行，一律普通话')
+check(/def asr_gate/.test(service) && service.includes('"refused": False')
+      && service.includes('"mode": "mandarin"'),
+      'asr_gate 恒放行（refused 恒 False、mode 恒 mandarin）')
+check(service.includes('本构建只有普通话模型'),
+      '如实说明：本构建只有普通话模型（覆盖多数口音），未含各地方言模型')
+check(voiceApi.includes('dialect: str | None') && voiceApi.includes('dialect=req.dialect'),
+      '/api/asr 仍接收 dialect 字段（只作记录，不影响识别）')
 check(/dialect_service\.asr_gate\(dialect\)/.test(voiceSvc),
       '方言闸门在 ASR 前执行（后端能力，不是前端自觉）')
-check(voiceApi.includes('dialect: str | None') && voiceApi.includes('dialect=req.dialect'),
-      '/api/asr 接收方言并由后端判定')
-check(root('app.py').includes('def transcribe_audio(audio_input, dialect_hint=None)')
-      && root('app.py').includes('if hint.get("cluster")'),
-      '引擎参数只来自后端选型（dialect_hint），不在 app.py 猜')
 
 // ---------------------------------------------------------------- 3
-section(3, '前端只做体验链路：切换 + 拒绝处理')
-check(chat.includes('chooseDialect') && chat.includes('小忆听'),
-      '聊天页有方言切换入口')
-check(chat.includes('dialect: session.dialect'),
-      '录音识别时把当前方言传给后端')
-check(chat.includes('d.refused') && chat.includes('d.reply'),
-      '后端拒绝时前端大字幕/语音直说，不硬发')
-check(chat.includes('if (!opt.supported)') && chat.includes('还在学'),
-      '未上线方言只展示「还在学」，不可切过去')
-check(session.includes('dialect:') && session.includes('setDialect')
-      && session.includes('dialect: this.dialect'),
-      '方言选择本地持久化（刷新不丢）')
+section(3, '前端不做方言切换：录音直接按普通话识别')
+check(!chat.includes('chooseDialect') && !chat.includes('loadDialectConfig'),
+      '聊天页已无方言切换入口（chooseDialect/loadDialectConfig 已移除）')
+check(!chat.includes('dialect: session.dialect') && !chat.includes('d.refused'),
+      '录音识别不传方言、无拒绝处理（一律普通话）')
+check(chat.includes('api.asr({ audio_base64: audioBase64 })'),
+      'ASR 请求不带 dialect 字段')
+check(session.includes('setDialect'),
+      '方言选择本地持久化仍保留（供统计，不影响识别）')
 check(apiSrc.includes('dialectConfig') && apiSrc.includes('setDialectProfile'),
-      '前端只调配置/采集接口，不拼上线逻辑')
+      '配置/采集接口保留（子女端表单仍收方言，只进统计）')
 
 // ---------------------------------------------------------------- 4
 section(4, '三通道统计齐全才出 Top3')

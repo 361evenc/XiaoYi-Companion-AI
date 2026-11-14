@@ -40,6 +40,12 @@ export const api = {
   visionStop: () => http.post('/vision/stop', null, { timeout: 30000 }),
   // 主动验证：只在状态出现 released 且本次没做过停止验证时调一次
   visionVerify: () => http.get('/vision/verify', { timeout: 15000 }),
+  // H-12 通话识别（opt-in）：通话页"让小忆看"时上传一帧，内存识别、不落盘、不写画像。
+  // 首帧要等模型加载，超时放宽；模型缺失时返回 ok:false，前端降级纯语音。
+  callObserve: (payload) => http.post('/call/vision/observe', payload, { timeout: 30000 }),
+  // VLM 场景描述（qwen3-vl-plus）：把"画面里有什么"说清楚喂给对话，解决"识别不出/乱说"。走大模型，放宽超时。
+  callScene: (payload) => http.post('/call/vision/scene', payload, { timeout: 45000 }),
+  callVisionEnd: (callId) => http.post('/call/vision/end', null, { params: { call_id: callId }, timeout: 10000 }),
   forget: (payload) => http.post('/forget', payload),
   wipeMemory: (payload) => http.delete('/memory/wipe', { data: payload || {} }),
   getEmotionChart: () => http.get('/emotion-chart'),

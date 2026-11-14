@@ -18,39 +18,6 @@
       </span>
     </button>
 
-    <button class="nav-card" type="button" @click="$router.push('/timeline')">
-      <span class="nav-icon">🗂️</span>
-      <span class="nav-text">
-        <span class="nav-name">家庭时间线</span>
-        <span class="nav-sub">按人、按地方翻旧事</span>
-      </span>
-    </button>
-
-    <button class="nav-card" type="button" @click="$router.push('/blindbox')">
-      <span class="nav-icon">🎁</span>
-      <span class="nav-text">
-        <span class="nav-name">今天的盲盒</span>
-        <span class="nav-sub">一天一个小惊喜</span>
-      </span>
-    </button>
-
-    <button class="nav-card" type="button" @click="$router.push('/bottle')">
-      <span class="nav-icon">🫙</span>
-      <span class="nav-text">
-        <span class="nav-name">收集瓶</span>
-        <span class="nav-sub">攒下的美好瞬间</span>
-      </span>
-    </button>
-
-    <!-- F-6 拍照小助手：拍前教（放平/光线/距离），拍中有太暗/太糊反馈 -->
-    <button class="nav-card" type="button" @click="$router.push('/photo-guide')">
-      <span class="nav-icon">📷</span>
-      <span class="nav-text">
-        <span class="nav-name">拍照小助手</span>
-        <span class="nav-sub">教您怎么拍清楚</span>
-      </span>
-    </button>
-
     <button class="nav-card" type="button" @click="$router.push('/history')">
       <span class="nav-icon">💬</span>
       <span class="nav-text">
@@ -108,6 +75,28 @@
         最近30天：提醒{{ reminders.stats.total }}次 · 办妥{{ reminders.stats.done }}次 · 完成率{{ reminders.stats.rate }}%
       </p>
     </div>
+
+    <!-- 更多功能：收纳新增入口（时间线/盲盒/收集瓶/拍照），记住老人上次展开/收起的偏好 -->
+    <button class="nav-more" type="button" :aria-expanded="showMore" @click="toggleMore">
+      <span>⋯ 更多功能</span>
+      <span class="nav-more-caret" :class="{ open: showMore }">▾</span>
+    </button>
+    <template v-if="showMore">
+      <button class="nav-card" type="button" @click="$router.push('/bottle')">
+        <span class="nav-icon">🫙</span>
+        <span class="nav-text">
+          <span class="nav-name">收集瓶</span>
+          <span class="nav-sub">攒下的美好瞬间</span>
+        </span>
+      </button>
+      <button class="nav-card" type="button" @click="$router.push('/photo-guide')">
+        <span class="nav-icon">📷</span>
+        <span class="nav-text">
+          <span class="nav-name">拍照小助手</span>
+          <span class="nav-sub">教您怎么拍清楚</span>
+        </span>
+      </button>
+    </template>
   </nav>
 </template>
 
@@ -116,6 +105,16 @@ import { computed, reactive, ref } from 'vue'
 import { api } from '../api'
 
 const showReminder = ref(false)
+// 更多功能：折叠收纳新增入口，记住老人上次展开/收起的偏好
+const MORE_KEY = 'xiaoyi.sidebar.more.v1'
+const showMore = ref(readMorePref())
+function readMorePref() {
+  try { return localStorage.getItem(MORE_KEY) === '1' } catch (e) { return false }
+}
+function toggleMore() {
+  showMore.value = !showMore.value
+  try { localStorage.setItem(MORE_KEY, showMore.value ? '1' : '0') } catch (e) {}
+}
 const loading = ref(false)
 const error = ref('')
 const reminders = reactive({ awaiting: [], pending: [], stats: null })
@@ -196,6 +195,33 @@ async function doCancel(id) {
 .nav-card:hover {
   transform: translateY(-1px);
   border-color: var(--color-accent);
+}
+.nav-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  min-height: 56px;
+  padding: 10px 16px;
+  font-size: var(--font-body);
+  font-weight: 700;
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--radius-lg);
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+.nav-more:hover {
+  border-color: var(--color-accent);
+}
+.nav-more-caret {
+  font-size: 18px;
+  color: var(--color-text-sub);
+  transition: transform 0.15s ease;
+}
+.nav-more-caret.open {
+  transform: rotate(180deg);
 }
 .nav-icon {
   font-size: 32px;

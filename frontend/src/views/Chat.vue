@@ -26,10 +26,10 @@
         <!-- F-2：录制状态文字提示 + 一键停；首次进入先告知再开 -->
         <VisionStatus ref="visionRef" />
 
-        <!-- 人格切换：影响小忆说话音色 -->
+        <!-- 性格：一行；方言不再手动切换，ASR 直接按普通话识别（覆盖大多数带口音的口语） -->
         <div class="voice-toolbar">
-          <span class="voice-label">小忆性格</span>
           <div class="persona-row">
+            <span class="voice-label">性格</span>
             <button
               v-for="p in personalities"
               :key="p"
@@ -39,33 +39,6 @@
               @click="setPersonality(p)"
             >
               {{ p }}
-            </button>
-          </div>
-        </div>
-
-        <!-- F-8 方言：能听懂的才可选；还没学会的点了就诚实说「还没学会」，不硬上 -->
-        <div class="voice-toolbar">
-          <span class="voice-label">小忆听</span>
-          <div class="persona-row">
-            <button
-              type="button"
-              class="persona-chip"
-              :class="{ on: session.dialect === '普通话' }"
-              @click="chooseDialect('普通话')"
-            >
-              普通话
-            </button>
-            <button
-              v-for="d in dialectOptions"
-              :key="d.name"
-              type="button"
-              class="persona-chip"
-              :class="{ on: session.dialect === d.name, 'dialect-not-yet': !d.supported }"
-              :title="d.supported ? '' : d.reason"
-              @click="chooseDialect(d.name)"
-            >
-              {{ d.name }}
-              <span v-if="!d.supported" class="not-yet-tag">还在学</span>
             </button>
           </div>
         </div>
@@ -93,13 +66,6 @@
         <FindObjectCard
           v-if="findResult && findVisible"
           :data="findResult"
-        />
-
-        <!-- F-5 反向索求任务卡：大字请老人说天气；前奏音只在“好事”播报前响 -->
-        <ReverseAskCard
-          :answered="weatherAnswered"
-          :answer-text="weatherAnswer"
-          @ask="askWeather"
         />
 
         <!-- F-6 拍后反馈：只提示“太暗 / 太糊”；可以重拍，也允许照发 -->
@@ -147,7 +113,6 @@ import ChatBubble from '../components/ChatBubble.vue'
 import FindObjectCard from '../components/FindObjectCard.vue'
 import InputCard from '../components/InputCard.vue'
 import VisionStatus from '../components/VisionStatus.vue'
-import ReverseAskCard from '../components/ReverseAskCard.vue'
 import { warm } from '../services/warmDependency'
 import { photoGuide } from '../data/photoGuide'
 
@@ -192,46 +157,35 @@ const photoWarn = ref(null)
 const weatherAnswered = ref(warm.weatherAnsweredToday())
 const weatherAnswer = ref(warm.getWeatherAnswer())
 
+// F-5：盲盒不做专门界面，改成小忆每隔 1~2 天（随机）在对话里顺口提一嘴
+const BOX_NEXT_KEY = 'xiaoyi.box.nextReveal.v1'
+const DAY_MS = 86400000
+let boxRevealedThisSession = false
+function boxNextRevealAt() {
+  try { return Number(localStorage.getItem(BOX_NEXT_KEY)) || 0 } catch (e) { return 0 }
+}
+function boxRevealDue() {
+  // 从没设过 → 到期；设过 → 到点才算（间隔随机 1~2 天）
+  return !boxRevealedThisSession && Date.now() >= boxNextRevealAt()
+}
+function revealBox() {
+  if (boxRevealedThisSession) return
+  const r = warm.openBox()
+  const text = (r && r.moment && r.moment.text) || ''
+  if (!text) return
+  boxRevealedThisSession = true
+  messages.value.push({ role: 'assistant', content: `对了，今天给您留了个小惊喜：${text}` })
+  session.chatHistory = messages.value
+  try {
+    localStorage.setItem(BOX_NEXT_KEY, String(Date.now() + DAY_MS * (1 + Math.random())))
+  } catch (e) {}
+}
+
 // F-7：首次激活的告知开关（大字 + 语音；老人始终知道孩子能看到什么）
 const careNotice = ref(false)
 
-// F-8：方言选项全部来自后端闸门；supported=false 的只展示「还在学」，不可切过去
-const dialectOptions = ref([])
-
-async function loadDialectConfig() {
-  try {
-    const res = await api.dialectConfig()
-    const d = res.data || {}
-    dialectOptions.value = d.options || []
-    // 之前选过的方言如果已经不在上线清单（闸门收紧），回到普通话
-    const cur = dialectOptions.value.find((o) => o.name === session.dialect)
-    if (session.dialect !== '普通话' && (!cur || !cur.supported)) {
-      session.setDialect('普通话')
-    }
-  } catch (e) {
-    // 方言配置读不到不影响聊天：保持普通话，下一轮再取
-    console.warn('[dialect] 读取方言配置失败', e)
-  }
-}
-
-function chooseDialect(name) {
-  if (name === session.dialect) return
-  const opt = dialectOptions.value.find((o) => o.name === name)
-  if (!opt) {
-    session.setDialect(name)
-    return
-  }
-  if (!opt.supported) {
-    // 诚实说：还没学会就是没学会，不假装听懂；继续用普通话
-    const reply = `我还没学会听${name}，等我学好了。咱先用普通话聊，好不好？`
-    messages.value.push({ role: 'assistant', content: reply })
-    session.chatHistory = messages.value
-    speakLocal(reply)
-    return
-  }
-  session.setDialect(name)
-  speakLocal(`${name}，我听着呢。您说吧。`)
-}
+// 方言不再手动切换：ASR 请求不传 dialect，后端按普通话识别（覆盖大多数带口音的口语）。
+// 真正的分方言 ASR（河南/东北/山东/上海/湖北）需要方言模型 + 语料，本构建不含，不假装听懂。
 
 // 找物结果卡：只在命中找物时出现，且等语音先开口后再展示
 const findResult = ref(null)
@@ -295,11 +249,6 @@ async function speakLocal(text) {
   } catch (e) {
     playAudio(null, text)
   }
-}
-
-// 反向索求：小忆先问一句。这是请求、不是“好事”，所以不放前奏音
-function askWeather() {
-  speakLocal('您能告诉我今天天气怎么样吗？怎么说都行，我听着。')
 }
 
 // ---------- F-7 子女远程安心：首次告知 + 购药回执通知 ----------
@@ -402,6 +351,8 @@ async function sendMessage(text) {
     handleChatResponse(res.data)
     const fr = await findPromise
     revealFindCard(fr && fr.data)
+    // 小忆顺口提一嘴盲盒（每 1~2 天随机，没有专门界面）
+    if (boxRevealDue()) revealBox()
   } catch (e) {
     error.value = '发送失败，请稍后再试。'
     console.error(e)
@@ -549,16 +500,9 @@ async function handleVoiceStop() {
 
 async function onRecorderAudio(audioBase64) {
   try {
-    const res = await api.asr({ audio_base64: audioBase64, dialect: session.dialect })
+    // 不传 dialect：后端按普通话识别（覆盖大多数带口音的口语），无手动切换、不拒绝
+    const res = await api.asr({ audio_base64: audioBase64 })
     const d = res.data || {}
-    // F-8：后端闸门没放行的方言，不把残文当老人原话，直说「还没学会」
-    if (d.refused) {
-      const reply = d.reply || '我还没学会听这个方言，等我学好了。'
-      messages.value.push({ role: 'assistant', content: reply })
-      session.chatHistory = messages.value
-      speakLocal(reply)
-      return
-    }
     const text = (d.text || '').trim()
     if (!text) {
       error.value = '没听清，请再说一遍。'
@@ -664,7 +608,6 @@ async function pollProactive() {
 onMounted(() => {
   connectWs()
   initChildLink()
-  loadDialectConfig()
   proactiveTimer = setInterval(pollProactive, 30000)
   // 从"拍照小助手"点"知道了，去拍照"过来：直接把相机打开
   if (route.query.camera === '1') {
@@ -745,6 +688,7 @@ async function recallLast() {
 .persona-row {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 8px;
 }
 .persona-chip {
@@ -761,15 +705,6 @@ async function recallLast() {
   color: var(--color-accent2);
   border-color: var(--color-accent2);
   background: #EEF4F0;
-}
-.dialect-not-yet {
-  color: var(--color-text-sub);
-  border-style: dashed;
-}
-.not-yet-tag {
-  margin-left: 6px;
-  font-size: var(--font-small);
-  color: var(--color-text-sub);
 }
 .photo-warn {
   display: flex;

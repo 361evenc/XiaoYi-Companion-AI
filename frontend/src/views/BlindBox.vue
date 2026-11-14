@@ -23,12 +23,13 @@
           <p class="small-hint">开出什么，今天都是它。明天再来看新的。</p>
         </div>
 
-        <!-- 已打开：大字记忆 + 照片 + 念给我听（没有重开入口） -->
+        <!-- 已打开：大字记忆 + 照片 + 念给我听（没有重开入口）；素材是精选演示内容，如实标注 -->
         <div v-else class="revealed" aria-live="polite">
           <span class="tag">今天的小惊喜</span>
           <p class="memory-text">{{ moment.text }}</p>
-          <div v-if="moment.photo" class="photo-wrap">
-            <img class="photo" :src="moment.photo" alt="今天的小惊喜照片" />
+          <p class="demo-note">{{ DEMO_TAG }}·我们为您精选的暖心瞬间，不是您真实的回忆</p>
+          <div v-if="moment.photo && !photoBroken" class="photo-wrap">
+            <img class="photo" :src="moment.photo" alt="今天的小惊喜照片" @error="photoBroken = true" />
             <span class="demo-tag">{{ DEMO_TAG }}</span>
           </div>
           <p class="when-text">{{ dateText }}</p>
@@ -75,6 +76,8 @@ const opening = ref(false)
 
 const audioEl = ref(null)
 const playing = ref(false)
+// 演示照片是远程图片：加载失败就整块隐藏，不留裂图
+const photoBroken = ref(false)
 
 const dateText = computed(() => {
   const at = moment.value && moment.value.at
@@ -253,6 +256,11 @@ async function speakMemory() {
   color: #FFFFFF;
   background: rgba(45, 27, 14, 0.72);
   border-radius: 999px;
+}
+.demo-note {
+  margin: 0;
+  font-size: var(--font-body);
+  color: var(--color-text-sub);
 }
 .when-text {
   margin: 0;

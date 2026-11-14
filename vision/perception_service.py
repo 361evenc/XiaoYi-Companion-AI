@@ -32,6 +32,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from describe_frame import describe_frame, load_model
+from event_trigger import EventTrigger
 
 DATA_DIR = HERE / "data"
 FRAMES_FILE = DATA_DIR / "world_perception.json"
@@ -132,6 +133,11 @@ def main():
     prev_scene = None     # 上一窗口的主场景
     n_frames = n_summaries = 0
 
+    # T-1 端侧事件 → 云VLM 调度器（5 类事件闸门，平时 0 次 VLM）
+    # MVP：vlm_call=None（诚实降级不调 VLM）；接 VLM 后注入 callable(image, prompt)->str
+    trigger = EventTrigger(vlm_call=None,
+                           state_path=DATA_DIR / "event_trigger_state.json")
+
     try:
         while True:
             if deadline and time.time() >= deadline:
@@ -148,11 +154,14 @@ def main():
             if time.time() >= window_deadline:
                 if window:
                     s, prev_scene = summarize(window, seen, prev_scene)
+                    # T-1：5 类事件闸门 → 云 VLM 细描（平时 0 次 VLM，只有事件才调）
+                    if s["events"]:
+                        s["events"] = trigger.on_summary_events(s["events"])
+                        for e in s["events"]:
+                            tag = " [VLM]" if e.get("vlm_called") else ""
+                            print(f"[EVENT] {e}{tag}")
                     append_jsonl(SUMMARY_FILE, s)
                     n_summaries += 1
-                    if s["events"]:
-                        for e in s["events"]:
-                            print(f"[EVENT] {e}")
                     window = []
                 window_deadline = time.time() + args.summary_every
             time.sleep(0.2)

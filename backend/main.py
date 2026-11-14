@@ -12,7 +12,7 @@ from backend.core.state import engine
 from backend.core import background
 from backend.api import (chat, voice, history, memory, reminder, ws, emergency,
                          vision, callvision, fallsafety, photo_scene_api, explain_api,
-                         child_api, dialect_api)
+                         child_api, dialect_api, medication, cold_start)
 
 app = FastAPI(title="小忆陪伴 · 后端服务")
 
@@ -35,6 +35,8 @@ app.include_router(history.router)
 app.include_router(memory.router)
 app.include_router(reminder.router)
 app.include_router(emergency.router)
+app.include_router(medication.router)  # T-4：用药闭环（余量自报/购药待办/未回应通知子女）
+app.include_router(cold_start.router)  # T-3：冷启动编排（Day1-7 脚本，每天学一件事）
 app.include_router(ws.router)
 app.include_router(vision.router)   # H-2：录制状态/开关（F-2 指示灯用）
 app.include_router(callvision.router)  # H-12：通话识别结论/删除（无上传帧接口）

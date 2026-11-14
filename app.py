@@ -156,8 +156,10 @@ from reminder import (ReminderStore, cn_to_int, parse_time_expr, humanize_ts,
                       cancel_ack_message, wont_ack_message, abort_message,
                       capability_message, is_complaint_about_reminder,
                       split_thing_note)
+from medication import (MedicationStore, extract_remaining, extract_daily_dose)
+from cold_start import ColdStartOrchestrator
 from memory_system import (MemoryBank, match_symptoms, similarity, _char_ngrams,
-                           EmergencyContactStore)
+                           EmergencyContactStore, EmergencyRescue)
 import ai_services
 import health_kb
 
@@ -431,6 +433,10 @@ PENDING_TTL = 150            # 澄清/选择等待老人答复的有效期（秒
 CONFIRM_WINDOW = 6 * 3600    # 触发后可确认"办好了"的窗口
 
 reminder_store = ReminderStore(REMINDERS_FILE)
+# T-4 用药闭环存储（余量自报 + 购药待办 + 未回应通知子女判定；安全数据原子落盘）
+medication_store = MedicationStore("medication.json")
+# T-3 冷启动编排（Day1-7 脚本，每天学一件事；状态原子落盘，重启不丢进度）
+cold_start = ColdStartOrchestrator("cold_start.json")
 UI_STATE = {"personality": "踏实务实", "last_emotion": "平淡"}
 pending_reminder = {"kind": None, "data": {}, "ts": 0.0}
 reminder_queue = deque(maxlen=20)
@@ -1239,6 +1245,39 @@ def deepseek_chat_msgs(messages, max_tokens=300, timeout=60):
     print(f"DeepSeek调用失败: {last_err}")
     return ""
 
+def judge_photo_worth(desc, chat_history=None):
+    """照片是否值得长期记住（静默筛选，不打扰、不反问老人）。
+    结合识别描述 + 最近对话判断。判断不了（无 LLM / 失败）时默认 True——
+    宁可多记，不丢重要记忆。"""
+    recent = []
+    for m in (chat_history or [])[-6:]:
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        text = extract_text(m.get("content")).strip()
+        if text:
+            recent.append(f"{'您' if role == 'user' else '小忆'}：{text}")
+    ctx = "\n".join(recent) or "（最近没什么对话）"
+    prompt = (
+        "你是小忆的记忆判断器。老人刚给你看了一张照片。\n"
+        f"照片识别描述：{desc or '（没认出来）'}\n"
+        f"最近的对话：\n{ctx}\n\n"
+        "判断这张照片是否值得长期记住。重要的人、事、物、时刻，或有情感价值、"
+        "以后会想回看的，才记；普通随手拍、没什么信息量的，不记。\n"
+        "只输出一个词：记 或 不记"
+    )
+    try:
+        txt = deepseek_chat_msgs([{"role": "user", "content": prompt}], max_tokens=8, timeout=8)
+    except Exception:
+        txt = ""
+    if not txt:
+        return True
+    if "不记" in txt:
+        return False
+    return True
+
 # 服务层（安全过滤/小传/跨会话问候等）注入 DeepSeek 通道：离线优先，LLM 增强
 ai_services.init(deepseek_chat_msgs)
 
@@ -1273,6 +1312,9 @@ if _n_migrated:
 # B-11 紧急联络存储（独立小存储，原子写，不走画像淡忘/剪枝——安全数据）：
 # 登记三路径（老人自报/子女代填/上门代填）+ 逐位复述确认 + 主动呼叫 + 失败无静默
 emergency_contact_store = EmergencyContactStore("emergency_contact.json")
+
+# T-5 救命链路控制器（item1-4：触发/AI确认/倒计时/路径决定）
+rescue_controller = EmergencyRescue(emergency_contact_store)
 
 # 呼叫通道注入：桌面微信语音拉起（依赖/窗口缺失时 wechat_voice_call 返回 False，
 # store 层自动走"您自己打"兜底话术，绝不静默）
@@ -1449,6 +1491,16 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
                        f"全程只能称呼TA「{call_name}」"
                        f"（例如：{call_name}，您今天气色真好），"
                        f"绝对不能把TA叫成「{wrong_call}」。")
+    # 2026-11-12 反馈纠偏：① 老人"告诉位置+让记得"常被听成"帮您找东西"（见截图，眼镜那条）；
+    # ② 本地 3B 小模型爱凭空扯老人没提的人/事（"孙子"幻觉）——两条都显式写进 system。
+    system_content += (
+        "\n【记住东西放在哪】老人告诉您某样东西放在哪（如\"我的眼镜放在门口的抽屉里\"、"
+        "\"降压药搁床头了\"），尤其让您\"记得/记一下\"时，先应一句表示记住了"
+        "（如\"好嘞，我记下了，眼镜就放门口抽屉里，找不着跟我说\"）。"
+        "别把\"告诉您位置\"听成\"帮您找东西\"，也别反问。")
+    system_content += (
+        "\n【别凭空扯】只顺着老人这轮真正说的话回应。老人没提到的人、事、时间，你别自己编出来"
+        "（比如老人没说孙子，你就别提孙子；没提天气，你就别扯天气）。拿不准的就少说，别硬接。")
 
     # IP 定位 + 实时天气：直接写进 system。联网搜索不知道用户 IP，答不了
     # "我在哪/今天天气"，得靠这里把城市+当前气温递到小忆嘴边（无数据则空串零开销）
@@ -1541,6 +1593,17 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         save_conversation(conv_id, save_history)
         return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
+    # T-5 救命链路（item4 路径决定）：喊"救命"/"打120" → 30s可取消倒计时
+    # 优先级最高（救命不排队）——在 handle_chat 之前，先接住救命词
+    if re.search(r"救命|救我|打120|打一二零|一二零", str(user_input or "")):
+        rescue_res = rescue_controller.trigger_rescue(
+            str(user_input or ""), now=time.time())
+        rescue_msg = rescue_res.get("message", "")
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": rescue_msg}]
+        save_conversation(conv_id, save_history)
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
     # B-11 紧急联络口语闭环（确定性流程，不调模型）：登记/复述确认/更正/主动呼叫。
     # "帮我给孩子打电话"/"打120" 优先级最高（呼叫不排队）；
     # 登记复述优先级在记忆确认之上（紧急号码确认中途，别被别的话题接走）。
@@ -1549,6 +1612,21 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
     if emergency_reply is not None:
         save_history = internal_history + [{"role": "user", "content": user_input},
                                            {"role": "assistant", "content": emergency_reply}]
+        save_conversation(conv_id, save_history)
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
+    # T-4 用药闭环口语：余量自报（"降压药还剩5片"）+ 每天吃几次（"降压药一天吃2次"）
+    med_rem = extract_remaining(str(user_input or ""))
+    med_dose = extract_daily_dose(str(user_input or ""))
+    if med_rem or med_dose:
+        if med_rem:
+            med_reply = medication_store.report_remaining(
+                med_rem["med"], med_rem["num"], med_rem["unit"])["message"]
+        else:
+            med_reply = medication_store.set_daily_dose(
+                med_dose["med"], med_dose["num"])["message"]
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": med_reply}]
         save_conversation(conv_id, save_history)
         return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
@@ -2568,6 +2646,8 @@ STYLE_RULES = """
 - 纯打招呼可以简短；但老人分享今天的事、心情、吃了啥、谁陪了TA时，要热乎地接住：顺着TA的高兴说，把TA提到的点都接上（心情、饭、家里人），再追问一句细节或带出自己的感受，两三句到四五句，别一两句话就结束，也别翻来覆去啰嗦。
 - 别像念清单一样列条目（1234、破折号罗列、冒号清单都禁用，也不许用 # * - 这类排版符号，就用大白话写）。
 - 但老人提问、问"怎么办/怎么弄/怎么回事"、问健康、或者明确让你"说得全一点"时，要把话说全：具体怎么做、注意哪些，三四句、五六句都行，知道你啥就说啥，别只回几个字。
+- 【多说一点，别干巴】老人爱听晚辈唠，回答要实在、有分量：接住TA说的每一点，再补一句你自己的话或一个具体例子。宁肯四五六句，也别两三个字带过；但每句都得有内容，别注水。老人说了件事，你至少用三句接住：一句顺着TA说的、一句带出你的反应或感受、一句追问细节或自然续上。
+- 【只说出口的话】你输出的每一个字都是要对老人说出口的话。绝不要输出任何括号注释、内心提示、策略说明（"（转移话题）""（点赞）""（缓解其担忧）""（追问）"这类一律不许），也绝不写"我接下来要……"这类想法——只说人话，不写旁白、不写批注。
 """
 # 任务⑤：三人格口语示例（few-shot——老人实际对话风格）
 PERSONA_EXAMPLES = {

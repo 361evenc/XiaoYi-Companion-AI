@@ -53,4 +53,70 @@ export const T6_PARAMS = {
 
   // 瓶子里还没有内容时
   bottleEmptyPhrase: '瓶子里还没攒下事，等攒下了，我给您讲。',
+
+  // ============================================================
+  // T-6 定稿：五机制防成瘾护栏 + 量化指标（B-10 验收引用）
+  // 每机制三条护栏：频率硬上限 / 无连续 / 无悬念
+  // ============================================================
+  antiAddiction: {
+    // 机制1：反向索取
+    reverseAsk: {
+      maxPerDay: 2,              // 频率硬上限：一天最多 2 次
+      noConsecutive: true,       // 无连续：不连发
+      noSuspense: true,          // 无悬念：不吊胃口
+      metric: { name: 'response_rate', target: '>=50%', minSamples: 20 },
+    },
+    // 机制2：盲盒
+    blindBox: {
+      maxPerDay: 1,              // 频率硬上限：一天 1 个
+      noConsecutive: true,       // 无连续：不连开
+      noSuspense: true,          // 无悬念：无"再来一个"入口
+      metric: {
+        name: 'positive_ratio', target: '>=90%',
+        negativeFeedbackRate: '<=5%', minSamples: 50,
+      },
+    },
+    // 机制3：收集瓶
+    bottle: {
+      maxPerDay: 3,              // 频率硬上限：一天最多收集 3 件
+      noConsecutive: true,       // 无连续：不连讲
+      noSuspense: true,          // 无悬念：无断签焦虑
+      metric: {
+        name: 'replay_rate', target: '>=50%',
+        note: '初值，P1实测后回填',
+      },
+    },
+    // 机制4：前奏音
+    prelude: {
+      maxPerDay: 5,              // 频率硬上限：一天最多 5 次
+      noConsecutive: true,       // 无连续：不连响
+      oneToOne: true,            // 与正向事件 1:1（零误响）
+      metric: { name: 'zero_mismatch', target: '0', note: '20次播放抽查' },
+    },
+    // 机制5：自然回忆触发
+    naturalRecall: {
+      maxPerDay: 2,              // 频率硬上限：一天最多 2 次
+      noConsecutive: true,       // 无连续：不连触发
+      noSuspense: true,          // 无悬念：不吊胃口
+      metric: {
+        name: 'positive_dialog_duration', target: '>=3min',
+        note: '中位数，初值，P1实测后回填',
+      },
+    },
+  },
+
+  // 机制5：自然回忆触发（T-6 新增落地）
+  naturalRecall: {
+    enabled: true,
+    maxPerDay: 2,
+    noConsecutive: true,
+    // 触发条件：老人提到某个人/物/事（关键词命中）→ 触发回忆
+    // 关键词从记忆系统提取的高频人名/物名（运行时注入）
+    phrase: '您说这个，我想起之前那件了——',
+  },
+
+  // 盲盒心理原理：正向惊喜（随机是形式不是机制）
+  // 变率强化=赌博机制，不得写成原理；三个成瘾要件全砍掉：
+  // 频率硬上限 / 无连续 / 无"再来一个"入口+无悬念钩子
+  boxPsychology: '正向惊喜',
 }

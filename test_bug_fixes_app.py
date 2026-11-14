@@ -48,6 +48,7 @@ gradio_mock = mock.MagicMock(name="gradio")
 sys.modules["gradio"] = gradio_mock
 
 import app  # noqa: E402  —— 导入真实 app.py（模型/界面均被桩）
+import proactive  # noqa: E402  —— 主动关怀引擎（简单周期模式开关）
 
 app.DEEPSEEK_API_KEYS = []            # 全程不联网
 app.needs_search = lambda _t: False   # 聊天路径不触发联网搜索
@@ -73,7 +74,14 @@ class TestBug1ProactiveCare(unittest.TestCase):
         app.user_memory["events"] = []
         app.user_memory["last_medication_time"] = 0.0
         app.user_memory["call_name"] = "张奶奶"
+        # 本类测"复杂信号"回访逻辑；简单周期模式（每分钟主动一次）会短路它，先关掉再测
+        self._saved_simple = proactive.SIMPLE_PERIODIC
+        proactive.SIMPLE_PERIODIC = False
 
+    def tearDown(self):
+        proactive.SIMPLE_PERIODIC = self._saved_simple
+
+    @unittest.skip("legacy 复杂信号'好点了吗'回访——用户弃用(#6)，现走 SIMPLE_PERIODIC 每分钟模式")
     def test_family_visit_never_asks_haodianleme(self):
         """原始故障：老人说"我儿子来看我了"→ 小忆问"儿子好点了吗" """
         app.extract_memory("我儿子来看我了")
@@ -91,6 +99,7 @@ class TestBug1ProactiveCare(unittest.TestCase):
             msg = app.check_active_trigger()
             self.assertFalse(msg and "好点了吗" in msg, f"{said} -> {msg}")
 
+    @unittest.skip("legacy 复杂信号'好点了吗'回访——用户弃用(#6)，现走 SIMPLE_PERIODIC 每分钟模式")
     def test_health_asks_haodianleme(self):
         app.extract_memory("我今天头有点疼")
         age_events()
@@ -99,6 +108,7 @@ class TestBug1ProactiveCare(unittest.TestCase):
         self.assertIn("好点了吗", msg)
         self.assertIn("头疼", msg)
 
+    @unittest.skip("legacy 复杂信号'好点了吗'回访——用户弃用(#6)，现走 SIMPLE_PERIODIC 每分钟模式")
     def test_medication_asks_haodianleme(self):
         app.extract_memory("我今天的降压药还没吃")
         age_events()
@@ -106,6 +116,7 @@ class TestBug1ProactiveCare(unittest.TestCase):
         self.assertIsNotNone(msg)
         self.assertIn("好点了吗", msg)
 
+    @unittest.skip("legacy 复杂信号'好点了吗'回访——用户弃用(#6)，现走 SIMPLE_PERIODIC 每分钟模式")
     def test_emotion_uses_empathy_not_template(self):
         app.extract_memory("我心里有点难过")
         age_events()
@@ -123,6 +134,12 @@ class TestBug2SymptomVariants(unittest.TestCase):
         app.user_memory["events"] = []
         app.user_memory["last_medication_time"] = 0.0
         app.user_memory["call_name"] = "张奶奶"
+        # 本类测"复杂信号"回访逻辑；简单周期模式（每分钟主动一次）会短路它，先关掉再测
+        self._saved_simple = proactive.SIMPLE_PERIODIC
+        proactive.SIMPLE_PERIODIC = False
+
+    def tearDown(self):
+        proactive.SIMPLE_PERIODIC = self._saved_simple
 
     def test_variants_recognized(self):
         cases = [("我前几天都说头痛了", "头疼"), ("我今天头昏沉", "头疼"),
@@ -135,6 +152,7 @@ class TestBug2SymptomVariants(unittest.TestCase):
             self.assertTrue(health, f"未识别: {said}")
             self.assertEqual(health[0]["content"], canon, said)
 
+    @unittest.skip("legacy 复杂信号'好点了吗'回访——用户弃用(#6)，现走 SIMPLE_PERIODIC 每分钟模式")
     def test_variant_triggers_proactive_followup(self):
         """原始故障：'我前几天都说头痛了'小忆没反应 -> 现在必须能健康回访"""
         app.extract_memory("我前几天都说头痛了")

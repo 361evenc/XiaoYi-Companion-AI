@@ -94,13 +94,15 @@ class CallVision:
 
     # ---------------- 主入口 ----------------
 
-    def observe(self, frame, call_id, scene=None):
+    def observe(self, frame, call_id, scene=None, persist=True):
         """识别一帧（只在内存里），返回结构化结果 + 本次实际写入画像的字段。
 
         参数：
             frame   : BGR ndarray（调用方负责用完即弃，本函数不留引用）
             call_id : 通话标识，写入画像用于关联
             scene   : 场景标签（可选，来自调用方；不认识就传 None，不硬猜）
+            persist : 是否把结果写进用户画像（默认 True）。通话页 opt-in 分析传 False：
+                      只把"这次看到什么"回给当下用，不落画像（通话"说完就忘掉"）
 
         返回 {"record": {...}, "written": [...], "hints": [...], "dropped": [...]}
         """
@@ -184,7 +186,9 @@ class CallVision:
         self._last_gaze = rec.get("gaze")
 
         # ★ 只写结构化结果。不写帧、不写图谱、不写记忆箱。
-        append_jsonl(PROFILE_FILE, rec)
+        #    通话页 opt-in 分析传 persist=False：帧零落盘 + 结论也不落画像（通话"说完就忘掉"）。
+        if persist:
+            append_jsonl(PROFILE_FILE, rec)
         self._frames_seen += 1
 
         # dropped：画像里有、但没进"已确认字段"的键（如 gaze_source 这类溯源标记）

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 /**
- * H-1 视频通话页 · 隐私边界代码校验
+ * H-1 视频通话页 · 隐私边界代码校验（更新版，2026-11-13）
  * ------------------------------------------------------------
- * 任务卡验收要求：
- *   "/call 页 …… 通话帧零落盘、零写入图谱/记忆箱（代码验证——隐私边界）"
+ * 2026-11-12 用户要求"视频持续检测、别纠结隐私"：帧可以送去做【内存】检测
+ * （YOLO+VLM，零落盘/零写图谱/零写记忆箱），但仍不许进照片库/记忆箱（持久化）。
+ * 本检查扫描 Call.vue：帧只许送 /api/call/vision/*，不许进照片库/记忆箱。
  *
  * 光靠人说"我没存"不算验证，所以做成脚本：扫描 Call.vue 的源码，
  * 检查它有没有任何能把画面"带出浏览器"的能力。
@@ -24,18 +25,13 @@ import { dirname, resolve } from 'node:path'
 const here = dirname(fileURLToPath(import.meta.url))
 const TARGET = resolve(here, '../src/views/Call.vue')
 
-// 能把视频帧变成数据/文件/网络请求的 API —— 一律不许出现在通话页
+// 禁止项：帧不许进照片库 / 记忆箱（持久化）。
+// 抓帧 API（toDataURL/drawImage/getContext）现在【允许】——帧要送内存检测（用户 2026-11-12 要求）。
 const FORBIDDEN = [
-  ['canvas.toDataURL', /toDataURL\s*\(/],
-  ['canvas.toBlob', /toBlob\s*\(/],
-  ['canvas.drawImage', /drawImage\s*\(/],
-  ['getImageData', /getImageData\s*\(/],
-  ['captureStream', /captureStream\s*\(/],
-  ['canvas.getContext', /getContext\s*\(\s*['"]2d['"]/],
-  ['照片上传接口 /api/photo', /api\.photo\s*\(/],
-  ['照片上传接口路径 /photo', /['"`]\/api\/photo/],
-  ['FormData 上传', /new\s+FormData\s*\(/],
-  ['fetch 直传', /fetch\s*\(/],
+  ['照片上传接口 /api/photo（持久化）', /api\.photo\s*\(/],
+  ['照片上传接口路径 /photo（持久化）', /['"`]\/api\/photo/],
+  ['FormData 上传（持久化）', /new\s+FormData\s*\(/],
+  ['写入记忆箱 /api/memorySearch（持久化）', /api\.(memorySearch|recall)\s*\(/],
 ]
 
 // 必须存在的实现 —— 少了就说明关键行为没落地
@@ -45,6 +41,7 @@ const REQUIRED = [
   ['复用既有 ASR 接口', /api\.asr\s*\(/],
   ['复用既有 chat 接口', /api\.chat\s*\(/],
   ['复用既有 TTS 播放', /audio_url/],
+  ['帧送内存检测端点 /api/call/vision/*（零落盘）', /api\.call(Observe|Scene|VisionEnd)\s*\(/],
 ]
 
 let src

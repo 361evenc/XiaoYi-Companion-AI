@@ -6,8 +6,9 @@
   2. 上线 = 分布 Top3 ∩ WER ≤ 基线×0.8 ∩ 有引擎参数（dialect_eval.json）。
      基线 = 当前 VOLC 普通话模型在同一批老人方言语料上的实测 WER，本卡第 1 周定死。
      任一条件不满足 → 该方言不上线，交集为空 → hold。
-  3. 听不懂就说听不懂：未上线方言一律回「我还没学会听X方言，等我学好了」，
-     不假装听懂、不把识别残文当老人原话。
+  3. 本构建不做分方言 ASR：各地方言模型 + 语料（河南/东北/山东/上海/湖北）
+     不在本构建内，一律走普通话模型识别（覆盖大多数口语中文 + 地域口音）。
+     asr_gate 恒放行，绝不回「还没学会」；不假装听懂某个具体方言。
 
 亲属声音复刻不在本卡（P1 最后一项、单独评审，红线#10）。这里只留一个默认关的
 开关位与说明，没有任何复刻接口——防止被顺手做了。
@@ -213,39 +214,22 @@ def _normalize(name):
     return ALIASES.get(s, s)
 
 
-def refusal_text(name):
-    """对老人诚实说：没学会就是没学会，不给假听懂。"""
-    name = _normalize(name) or "这个方言"
-    return f"我还没学会听{name}，等我学好了。"
-
-
 # ---------------------------------------------------------------- ASR 路由
 
 def asr_gate(dialect):
-    """ASR 前过闸门。
+    """ASR 前过闸门（放行版）。
 
     返回 {requested, dialect, mode, refused, reply, hint}
-      - 未指定/普通话 → 走普通话，不拦
-      - 上线方言     → mode=dialect，带引擎参数
-      - 其它         → refused=True + 固定诚实话术，不把残文当老人原话
+      - 本构建不做分方言 ASR：各地方言模型 + 语料（河南/东北/山东/上海/湖北）不在本构建内，
+        一律走普通话模型（覆盖大多数口语中文 + 地域口音），不假装听懂某个具体方言。
+      - refused 恒为 False：不拦、不说「还没学会」；请求的方言只作记录，识别一律按普通话进行。
     """
     requested = str(dialect or "").strip()
-    if not requested or _normalize(requested) == MANDARIN:
-        return {"requested": requested, "dialect": MANDARIN, "mode": "mandarin",
-                "refused": False, "reply": None, "hint": None}
-
-    name = _normalize(requested)
-    dist, ev = distribution(), evaluation()
-    online = online_dialects(dist, ev)
-    if name not in online:
-        return {"requested": requested, "dialect": name, "mode": "mandarin",
-                "refused": True, "reply": refusal_text(name),
-                "hint": None, "reason": dialect_reason(name, dist, ev)}
-
-    entry = next(e for e in ev["dialects"] if str(e.get("name")) == name)
-    hint = entry.get("asr") if isinstance(entry.get("asr"), dict) else None
-    return {"requested": requested, "dialect": name, "mode": "dialect",
-            "refused": False, "reply": None, "hint": hint}
+    name = _normalize(requested) or MANDARIN
+    return {"requested": requested, "dialect": name, "mode": "mandarin",
+            "refused": False, "reply": None,
+            "hint": None,  # None = 引擎按普通话（app.transcribe_audio 的缺省路径）
+            "reason": "本构建只有普通话模型（覆盖多数地域口音），未含各地方言模型"}
 
 
 # ---------------------------------------------------------------- 通道③：采集表单
