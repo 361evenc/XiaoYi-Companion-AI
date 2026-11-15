@@ -1446,6 +1446,31 @@ def _is_gibberish(text):
         return True
     return bool(_GIBBERISH_CODE_RE.search(text))
 
+# B-3 补充：记位置（告诉位置）确定性提取——与"找物"（问位置）相反。
+# 老人主动说"我的眼镜放在门口抽屉了"，必须把"眼镜位置=门口抽屉"写进记忆库；
+# 否则之后问"眼镜放哪了"，find_object 的 text 层查不到，只能答"我没瞅见"（反馈5 根因）。
+# 只匹配"放在/搁在/收到"（陈述位置），不匹配"放哪了/在哪"（问位置，归 find_object）。
+TELL_LOCATION_RE = re.compile(
+    r"(?P<obj>[\u4e00-\u9fff]{1,8}?)"
+    r"(?:放在|放到了|放到|搁在|搁到|收到|存到|摆在|挂到|塞到|搁)"
+    r"(?P<loc>[\u4e00-\u9fff0-9]{1,14}?)(?:了|哈|吧|哦)?(?:[，。！!？?；;]|$)")
+_TELL_LOC_PRONOUN_RE = re.compile(r"^(?:你|您|我|他|她|它|咱|谁|这|那)")
+
+def _extract_tell_location(text):
+    """提取"告诉位置"（确定性，不调模型）："我的眼镜放在门口抽屉了"→("眼镜","门口抽屉")。
+    不是告诉位置句式 / 物品是代词 → None。"""
+    t = str(text or "").strip()
+    if not t or len(t) > 32:
+        return None
+    m = TELL_LOCATION_RE.search(t)
+    if not m:
+        return None
+    obj = re.sub(r"^(?:我的|我那个|那个|这个)", "", m.group("obj")).strip()
+    loc = m.group("loc").strip()
+    if not obj or not loc or _TELL_LOC_PRONOUN_RE.match(obj):
+        return None
+    return (obj, loc)
+
 def chat_response(user_input, chat_history, surname, gender, is_muted, personality, conv_id, dropdown):
     global last_user_interaction_time
     if user_input and str(user_input).strip():
@@ -1630,6 +1655,21 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
         save_conversation(conv_id, save_history)
         return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
 
+    # B-3 补充：记位置（告诉位置）确定性处理器——老人说"X放在Y了"→写入"X位置=Y"→应"记住了"。
+    # 这是"记位置"的地基：不写进记忆库，之后问"X放哪了"就答不上（反馈5）。
+    # 放在 find_object 之前：告诉位置（放在）≠ 找位置（放哪了），两者不冲突。
+    tell_loc = _extract_tell_location(user_input)
+    if tell_loc is not None:
+        _t_obj, _t_loc = tell_loc
+        memory_bank._add_fact("物品", f"{_t_obj}位置", _t_loc,
+                              str(user_input), importance=6, confidence=0.9,
+                              now=time.time())
+        loc_reply = f"好嘞，我记下了，{_t_obj}就放{_t_loc}，找不着您跟我说一声。"
+        save_history = internal_history + [{"role": "user", "content": user_input},
+                                           {"role": "assistant", "content": loc_reply}]
+        save_conversation(conv_id, save_history)
+        return "", save_history, None, conv_id, gr.update(choices=get_conversation_list_display())
+
     # B-3 找物三级回答（B-1 PRD §3 话术写死，确定性流程）：graph（我瞅见它了）→
     # text（您上次说）→ none（我没瞅见+失败后引导），语音播报在前、F-1 屏幕在后。
     find_res = memory_bank.find_object(user_input, user_memory["call_name"])
@@ -1669,6 +1709,7 @@ def chat_response(user_input, chat_history, surname, gender, is_muted, personali
     # 照片场景强制走 DeepSeek：视觉识别已联网，本地 3B 对"看照片"语境
     # 实测既慢（CPU 生成 30s+，photo 端到端 40s 导致前端超时）又爱吐乱语
     use_deepseek = (str(user_input).startswith("【我给您看张照片")
+                    or str(user_input).startswith("【小忆此刻看到】")
                     or bool(search_context) or _model is None
                     or len(internal_history) > LONG_HIST_TURNS * 2)
     mem_ctx = memory_bank.build_chat_context(
